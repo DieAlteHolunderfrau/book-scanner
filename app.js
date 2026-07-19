@@ -1,6 +1,7 @@
 const els = {
   vault: document.querySelector("#vault"),
   folder: document.querySelector("#folder"),
+  googleApiKey: document.querySelector("#google-api-key"),
   manualIsbn: document.querySelector("#manual-isbn"),
   lookupButton: document.querySelector("#lookup-button"),
   status: document.querySelector("#status"),
@@ -23,6 +24,7 @@ const els = {
 
 let lastScanned = "";
 let lookupInProgress = false;
+let currentMetadataSource = "manual";
 
 function setStatus(message, kind = "") {
   els.status.textContent = message;
@@ -34,8 +36,10 @@ function digitsOnly(value) {
 }
 
 function normalizeIsbn(value) {
-  const digits = digitsOnly(value);
-  return digits.length === 10 ? isbn10To13(digits) : digits;
+  const raw = String(value ?? "").trim();
+  const compact = raw.replace(/[\s-]/g, "");
+  if (/^\d{9}[\dXx]$/.test(compact)) return isbn10To13(compact);
+  return digitsOnly(compact);
 }
 
 function isbn10To13(isbn10) {
@@ -114,7 +118,7 @@ function buildMarkdown() {
     `ownership: ${book.ownership}`,
     `reading_status: ${book.readingStatus}`,
     `added: ${todayIso()}`,
-    "metadata_source: google-books",
+    `metadata_source: ${currentMetadataSource}`,
     "---",
     "",
     `# ${book.title}`,
@@ -146,11 +150,128 @@ function updatePreview() {
   }
 }
 
-function selectBestVolume(items, isbn) {
+async function fetchJson(url, sourceName) {
+  let response;
+  try {
+    response = await fetch(url, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+    });
+  } catch (error) {
+    throw new Error(`${sourceName}: Netzwerkfehler (${error.message || "fetch fehlgeschlagen"})`);
+  }
+
+  if (!response.ok) {
+    let detail = "";
+    try {
+      const body = await response.text();
+      detail = body ? ` – ${body.slice(0, 160).replace(/\s+/g, " ")}` : "";
+    } catch (_) {
+      // Der HTTP-Status reicht für die Diagnose.
+    }
+    const error = new Error(`${sourceName}: HTTP ${response.status}${detail}`);
+    error.status = response.status;
+    throw error;
+  }
+
+  try {
+    return await response.json();
+  } catch (error) {
+    throw new Error(`${sourceName}: ungültige JSON-Antwort`);
+  }
+}
+
+function languageCodes(languages) {
+  if (!Array.isArray(languages)) return "";
+  return languages
+    .map((entry) => String(entry?.key ?? entry ?? "").split("/").filter(Boolean).pop())
+    .filter(Boolean)
+    .join(", ");
+}
+
+async function resolveOpenLibraryAuthors(authors) {
+  if (!Array.isArray(authors) || authors.length === 0) return [];
+
+  const names = await Promise.all(
+    authors.slice(0, 8).map(async (author) => {
+      if (author?.name) return author.name;
+      const key = author?.key;
+      if (!key || !String(key).startsWith("/authors/")) return "";
+      try {
+        const data = await fetchJson(`https://openlibrary.org${key}.json`, "Open Library Autor");
+        return data.name ?? data.personal_name ?? "";
+      } catch (error) {
+        console.warn(error);
+        return "";
+      }
+    })
+  );
+
+  return names.filter(Boolean);
+}
+
+async function lookupOpenLibrary(isbn) {
+  const edition = await fetchJson(
+    `https://openlibrary.org/isbn/${encodeURIComponent(isbn)}.json`,
+    "Open Library"
+  );
+  const authors = await resolveOpenLibraryAuthors(edition.authors);
+  const coverId = Array.isArray(edition.covers) ? edition.covers.find((id) => Number(id) > 0) : null;
+
+  return {
+    title: edition.title ?? "",
+    authors,
+    publisher: Array.isArray(edition.publishers) ? edition.publishers[0] ?? "" : edition.publishers ?? "",
+    publishedDate: edition.publish_date ?? "",
+    pages: edition.number_of_pages ?? edition.pagination ?? "",
+    language: languageCodes(edition.languages),
+    coverUrl: coverId ? `https://covers.openlibrary.org/b/id/${coverId}-L.jpg` : "",
+    source: "open-library",
+  };
+}
+
+function selectBestGoogleVolume(items, isbn) {
   return items.find((item) =>
     (item.volumeInfo?.industryIdentifiers ?? [])
       .some((entry) => digitsOnly(entry.identifier) === isbn)
   ) ?? items[0];
+}
+
+async function lookupGoogleBooks(isbn, apiKey) {
+  const endpoint =
+    `https://www.googleapis.com/books/v1/volumes?q=isbn:${encodeURIComponent(isbn)}` +
+    `&maxResults=5&printType=books&key=${encodeURIComponent(apiKey)}`;
+  const data = await fetchJson(endpoint, "Google Books");
+  if (!Array.isArray(data.items) || data.items.length === 0) return null;
+
+  const info = selectBestGoogleVolume(data.items, isbn).volumeInfo ?? {};
+  const imageLinks = info.imageLinks ?? {};
+  return {
+    title: info.title ?? "",
+    authors: Array.isArray(info.authors) ? info.authors : [],
+    publisher: info.publisher ?? "",
+    publishedDate: info.publishedDate ?? "",
+    pages: info.pageCount ?? "",
+    language: info.language ?? "",
+    coverUrl: String(imageLinks.thumbnail ?? imageLinks.smallThumbnail ?? "")
+      .replace(/^http:\/\//i, "https://"),
+    source: "google-books",
+  };
+}
+
+function applyBookData(isbn, book) {
+  els.isbn.value = isbn;
+  els.title.value = book?.title ?? "";
+  els.authors.value = Array.isArray(book?.authors) ? book.authors.join("; ") : "";
+  els.publisher.value = book?.publisher ?? "";
+  els.publishedDate.value = book?.publishedDate ?? "";
+  els.pages.value = digitsOnly(book?.pages ?? "");
+  els.language.value = book?.language ?? "";
+  els.coverUrl.value = book?.coverUrl ?? "";
+  currentMetadataSource = book?.source ?? "manual";
+  els.resultCard.classList.remove("hidden");
+  updatePreview();
 }
 
 async function lookupBook(rawIsbn) {
@@ -164,51 +285,45 @@ async function lookupBook(rawIsbn) {
 
   lookupInProgress = true;
   els.lookupButton.disabled = true;
-  setStatus(`Suche nach ISBN ${isbn} …`);
+  setStatus(`Suche ISBN ${isbn} zuerst bei Open Library …`);
+
+  const errors = [];
 
   try {
-    const endpoint =
-      `https://www.googleapis.com/books/v1/volumes?q=isbn:${encodeURIComponent(isbn)}` +
-      "&maxResults=5&printType=books";
-    const response = await fetch(endpoint);
-
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-
-    const data = await response.json();
-    if (!Array.isArray(data.items) || data.items.length === 0) {
-      els.isbn.value = isbn;
-      els.resultCard.classList.remove("hidden");
-      updatePreview();
-      setStatus("Kein Treffer. Die ISBN wurde übernommen; ergänze die Felder manuell.", "error");
+    try {
+      const openLibraryBook = await lookupOpenLibrary(isbn);
+      applyBookData(isbn, openLibraryBook);
+      els.resultCard.scrollIntoView({ behavior: "smooth", block: "start" });
+      setStatus(`Treffer für ISBN ${isbn} über Open Library geladen.`, "success");
       return;
+    } catch (error) {
+      errors.push(error.message);
+      console.warn(error);
     }
 
-    const info = selectBestVolume(data.items, isbn).volumeInfo ?? {};
-    const imageLinks = info.imageLinks ?? {};
+    const apiKey = els.googleApiKey.value.trim();
+    if (apiKey) {
+      setStatus("Open Library hatte keinen nutzbaren Treffer. Versuche Google Books …");
+      try {
+        const googleBook = await lookupGoogleBooks(isbn, apiKey);
+        if (googleBook) {
+          applyBookData(isbn, googleBook);
+          els.resultCard.scrollIntoView({ behavior: "smooth", block: "start" });
+          setStatus(`Treffer für ISBN ${isbn} über Google Books geladen.`, "success");
+          return;
+        }
+        errors.push("Google Books: kein Treffer");
+      } catch (error) {
+        errors.push(error.message);
+        console.warn(error);
+      }
+    } else {
+      errors.push("Google Books nicht versucht: kein API-Key hinterlegt");
+    }
 
-    els.isbn.value = isbn;
-    els.title.value = info.title ?? "";
-    els.authors.value = Array.isArray(info.authors) ? info.authors.join("; ") : "";
-    els.publisher.value = info.publisher ?? "";
-    els.publishedDate.value = info.publishedDate ?? "";
-    els.pages.value = info.pageCount ?? "";
-    els.language.value = info.language ?? "";
-    els.coverUrl.value = String(imageLinks.thumbnail ?? imageLinks.smallThumbnail ?? "")
-      .replace(/^http:\/\//i, "https://");
-
-    els.resultCard.classList.remove("hidden");
-    updatePreview();
+    applyBookData(isbn, null);
     els.resultCard.scrollIntoView({ behavior: "smooth", block: "start" });
-    setStatus(`Treffer für ISBN ${isbn} geladen.`, "success");
-  } catch (error) {
-    console.error(error);
-    els.isbn.value = isbn;
-    els.resultCard.classList.remove("hidden");
-    updatePreview();
-    setStatus(
-      "Die Metadatensuche ist fehlgeschlagen. Prüfe die Verbindung oder trage das Buch manuell ein.",
-      "error"
-    );
+    setStatus(`Keine Metadaten geladen. ${errors.join(" | ")}`, "error");
   } finally {
     lookupInProgress = false;
     els.lookupButton.disabled = false;
@@ -218,11 +333,13 @@ async function lookupBook(rawIsbn) {
 function saveSettings() {
   localStorage.setItem("bookScanner.vault", els.vault.value.trim());
   localStorage.setItem("bookScanner.folder", els.folder.value.trim());
+  localStorage.setItem("bookScanner.googleApiKey", els.googleApiKey.value.trim());
 }
 
 function loadSettings() {
   els.vault.value = localStorage.getItem("bookScanner.vault") ?? "";
   els.folder.value = localStorage.getItem("bookScanner.folder") ?? "Bücher";
+  els.googleApiKey.value = localStorage.getItem("bookScanner.googleApiKey") ?? "";
 }
 
 function openInObsidian() {
@@ -313,6 +430,7 @@ els.obsidianButton.addEventListener("click", openInObsidian);
 els.copyButton.addEventListener("click", copyMarkdown);
 els.vault.addEventListener("change", saveSettings);
 els.folder.addEventListener("change", saveSettings);
+els.googleApiKey.addEventListener("change", saveSettings);
 
 for (const input of els.resultCard.querySelectorAll("input, select")) {
   input.addEventListener("input", updatePreview);

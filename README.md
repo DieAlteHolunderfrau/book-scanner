@@ -1,46 +1,18 @@
-# Buchscanner für Obsidian
+# Buchscanner für Obsidian – Version 2
 
-Eine kleine Progressive Web App:
+Die Metadatensuche verwendet jetzt zuerst Open Library ohne API-Key. Optional kann unter „Google-Books-Fallback“ ein Google Books API-Key lokal im Browser hinterlegt werden.
 
-1. ISBN-Barcode mit der Handykamera scannen.
-2. Metadaten über Google Books laden.
-3. Felder prüfen oder korrigieren.
-4. Eine Markdown-Notiz über `obsidian://new` im mobilen Obsidian-Vault anlegen.
+## Fehlerbehebung nach dem Update
 
-## Veröffentlichung mit GitHub Pages
+Die erste Version hatte einen Cache-First-Service-Worker. Dadurch kann das Telefon trotz neuer Dateien noch die alte App anzeigen.
 
-1. Neues GitHub-Repository anlegen, etwa `book-scanner`.
-2. Den **Inhalt** dieses Ordners in das Repository hochladen.
-3. Im Repository **Settings → Pages** öffnen.
-4. Bei **Build and deployment** `Deploy from a branch` wählen.
-5. Branch `main`, Ordner `/ (root)` wählen und speichern.
-6. Die anschließend angezeigte Pages-Adresse auf dem Telefon öffnen.
+1. Neue Dateien vollständig auf GitHub hochladen und committen.
+2. Die Seite im Browser einmal neu laden.
+3. Falls weiterhin die alte Fehlermeldung erscheint: installierte Web-App löschen und neu installieren oder Website-Daten/Cache für die Pages-Adresse löschen.
 
-Die Kamera benötigt HTTPS. GitHub Pages liefert HTTPS.
+Die neue Version zeigt bei fehlgeschlagenen Abrufen den tatsächlichen Dienst und HTTP-Status an.
 
-## Installation auf dem Telefon
+## Datenquellen
 
-### iPhone
-
-Safari → Teilen → **Zum Home-Bildschirm** → **Als Web-App öffnen** aktivieren.
-
-### Android
-
-Chrome → Menü → **App installieren** oder **Zum Startbildschirm hinzufügen**.
-
-Danach Kamera erlauben.
-
-## Obsidian
-
-- Obsidian auf dem Telefon installieren.
-- Den synchronisierten Vault einmal öffnen.
-- In der Scanner-App den Vault-Namen exakt eintragen.
-- Zielordner festlegen, standardmäßig `Bücher`.
-
-## Grenzen des Prototyps
-
-- Er scannt den ISBN-Barcode, noch keine ganzen Buchrücken.
-- `html5-qrcode` wird beim ersten Aufruf von cdnjs geladen.
-- Google-Books-Daten können fehlen oder eine andere Ausgabe beschreiben.
-- Es gibt noch keine Dublettenprüfung gegen den Vault.
-- Cover werden als URL gespeichert.
+- Open Library: `https://openlibrary.org/isbn/{ISBN}.json`
+- Google Books optional: `https://www.googleapis.com/books/v1/volumes?q=isbn:{ISBN}&key={API_KEY}`
