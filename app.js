@@ -68,8 +68,9 @@ let zoomTimer = null;
 
 const RECOGNITION_ATTEMPTS = 5;
 const RECOGNITION_INTERVAL_MS = 1000;
-const BATCH_STORAGE_KEY = "bookScanner.batch.v9";
+const BATCH_STORAGE_KEY = "bookScanner.batch.v10";
 const LEGACY_BATCH_STORAGE_KEYS = [
+  "bookScanner.batch.v9",
   "bookScanner.batch.v8",
   "bookScanner.batch.v7",
   "bookScanner.batch.v6",
@@ -773,6 +774,8 @@ function openBookInObsidian(book, markExported = false, clearCurrent = false) {
     setQueueStatus(`„${book.title}“ wird an Obsidian übergeben. Kehre danach für das nächste Buch zurück.`, "success");
   }
   if (clearCurrent) resetFormForNextScan();
+  // Externe App öffnen: Kamera vorher sofort freigeben, damit keine alte Sitzung sie blockiert.
+  releaseCameraTracks();
   window.location.href = uri;
 }
 
@@ -1616,6 +1619,83 @@ async function applyCameraEnhancements() {
   setStatus(`Kamera aktiv${width ? ` (${width})` : ""}. Erkennung kann manuell gestartet werden.`, "success");
   setAutoScanState("Bereit – Erkennung manuell starten.");
   updateRecognitionControls();
+  updateCameraButton();
+}
+
+function updateCameraButton() {
+  if (!els.cameraRestartButton) return;
+  els.cameraRestartButton.textContent = scannerRunning ? "Kamera neu starten" : "Kamera starten";
+  els.cameraRestartButton.disabled = Boolean(scannerStarting);
+}
+
+function releaseCameraTracks() {
+  for (const track of mediaStream?.getTracks?.() ?? []) {
+    try { track.stop(); } catch (_) { /* Track ist bereits beendet. */ }
+  }
+  mediaStream = null;
+  videoTrack = null;
+  imageCapture = null;
+  if (els.cameraVideo) {
+    try { els.cameraVideo.pause(); } catch (_) { /* unkritisch */ }
+    els.cameraVideo.srcObject = null;
+  }
+  scannerRunning = false;
+  recognitionRunning = false;
+  torchOn = false;
+  els.torchButton.textContent = "Licht einschalten";
+  els.torchButton.classList.add("hidden");
+  els.zoomPanel.classList.add("hidden");
+  updateRecognitionControls();
+  updateCameraButton();
+}
+
+function cameraErrorMessage(error) {
+  const name = String(error?.name ?? "");
+  const message = String(error?.message ?? error ?? "Unbekannter Fehler");
+  if (name === "NotAllowedError" || name === "SecurityError") {
+    return "Kamerazugriff wurde nicht erlaubt. Erlaube der Website die Kamera in den Browser- oder Website-Einstellungen.";
+  }
+  if (name === "NotFoundError" || name === "DevicesNotFoundError") {
+    return "Es wurde keine nutzbare Kamera gefunden.";
+  }
+  if (name === "NotReadableError" || /starting videoinput failed|could not start video|camera.*busy/i.test(message)) {
+    return "Die Kamera ist noch durch eine andere App, einen anderen Browser-Tab oder eine ältere Buchscanner-Sitzung belegt. Schließe diese Kameraansicht vollständig und tippe danach erneut auf „Kamera starten“.";
+  }
+  if (name === "OverconstrainedError") {
+    return "Die angeforderten Kameraeinstellungen werden nicht unterstützt. Der Standardmodus ist ebenfalls fehlgeschlagen.";
+  }
+  return `Kamera konnte nicht gestartet werden (${name || "Fehler"}): ${message}`;
+}
+
+async function requestCameraStream() {
+  const attempts = [
+    {
+      audio: false,
+      video: {
+        facingMode: { ideal: "environment" },
+        width: { ideal: 1920 },
+        height: { ideal: 1080 },
+        frameRate: { ideal: 24, max: 30 },
+      },
+    },
+    { audio: false, video: { facingMode: { ideal: "environment" } } },
+    { audio: false, video: true },
+  ];
+
+  let lastError = null;
+  for (let index = 0; index < attempts.length; index += 1) {
+    try {
+      return await navigator.mediaDevices.getUserMedia(attempts[index]);
+    } catch (error) {
+      lastError = error;
+      console.warn(`Kameraversuch ${index + 1}/${attempts.length} fehlgeschlagen:`, error);
+      if (["NotAllowedError", "SecurityError", "NotFoundError", "DevicesNotFoundError"].includes(error?.name)) {
+        throw error;
+      }
+      if (index < attempts.length - 1) await wait(index === 0 ? 450 : 750);
+    }
+  }
+  throw lastError ?? new Error("Kein Kamerastream verfügbar.");
 }
 
 async function startScanner() {
@@ -1631,64 +1711,55 @@ async function startScanner() {
 
   scannerStarting = (async () => {
     cancelRecognition("Kamera wird vorbereitet …");
-    setStatus("Rückkamera und Autofokus werden vorbereitet …");
-    const constraints = {
-      audio: false,
-      video: {
-        facingMode: { ideal: "environment" },
-        width: { ideal: 1920 },
-        height: { ideal: 1080 },
-        frameRate: { ideal: 24, max: 30 },
-      },
-    };
+    releaseCameraTracks();
+    updateCameraButton();
+    setStatus("Rückkamera wird vorbereitet …");
+    setAutoScanState("Kamera wird gestartet …");
 
-    try {
-      mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
-    } catch (enhancedError) {
-      console.warn("Erweiterte Kameraeinstellungen fehlgeschlagen, versuche Standardmodus:", enhancedError);
-      mediaStream = await navigator.mediaDevices.getUserMedia({
-        audio: false,
-        video: { facingMode: { ideal: "environment" } },
-      });
-    }
-
+    // Einige mobile Browser geben die Hardware erst mit kurzer Verzögerung frei.
+    await wait(350);
+    mediaStream = await requestCameraStream();
     videoTrack = mediaStream.getVideoTracks()[0] ?? null;
+    if (!videoTrack) throw new Error("Der Kamerastream enthält keine Videospur.");
+
     imageCapture = null;
     els.cameraVideo.srcObject = mediaStream;
     await els.cameraVideo.play();
     scannerRunning = true;
     recognitionRunning = false;
     torchOn = false;
-    els.torchButton.textContent = "Licht einschalten";
+
+    videoTrack.addEventListener("ended", () => {
+      if (!scannerRunning) return;
+      releaseCameraTracks();
+      setAutoScanState("Kamera wurde beendet.");
+      setStatus("Die Kamera wurde vom Browser oder Betriebssystem beendet. Tippe auf „Kamera starten“.", "error");
+    }, { once: true });
+
     await applyCameraEnhancements();
   })();
 
+  updateCameraButton();
   try {
     await scannerStarting;
   } catch (error) {
     console.error(error);
-    setStatus(`Kamera konnte nicht gestartet werden: ${error.message || error}`, "error");
-    await stopScanner();
+    releaseCameraTracks();
+    setAutoScanState("Kamera nicht aktiv");
+    setStatus(cameraErrorMessage(error), "error");
   } finally {
     scannerStarting = null;
+    updateCameraButton();
   }
 }
 
-async function stopScanner() {
-  cancelRecognition("Kamera gestoppt");
-  for (const track of mediaStream?.getTracks?.() ?? []) track.stop();
-  mediaStream = null;
-  videoTrack = null;
-  imageCapture = null;
-  if (els.cameraVideo) {
-    els.cameraVideo.pause();
-    els.cameraVideo.srcObject = null;
+async function stopScanner({ message = "Kamera gestoppt", quiet = false } = {}) {
+  cancelRecognition(message);
+  releaseCameraTracks();
+  if (!quiet) {
+    setAutoScanState(message);
+    setStatus("Kamera ist ausgeschaltet. Tippe auf „Kamera starten“, wenn du weiter scannen möchtest.");
   }
-  scannerRunning = false;
-  recognitionRunning = false;
-  torchOn = false;
-  setAutoScanState("Kamera gestoppt");
-  updateRecognitionControls();
 }
 
 function resumeScanner() {
@@ -1697,13 +1768,17 @@ function resumeScanner() {
     return;
   }
   if (!scannerRunning) {
-    startScanner();
+    setAutoScanState("Kamera ist aus.");
+    setStatus("Tippe auf „Kamera starten“, um die Vorschau zu öffnen.");
+    updateRecognitionControls();
+    updateCameraButton();
     return;
   }
   recognitionRunning = false;
   setAutoScanState("Bereit – Erkennung manuell starten.");
   setStatus("Bereit. Richte das Buch aus und tippe auf „Erkennung starten“.", "success");
   updateRecognitionControls();
+  updateCameraButton();
 }
 
 function ensureScannerReady() {
@@ -1711,11 +1786,17 @@ function ensureScannerReady() {
 }
 
 async function restartScanner() {
+  if (scannerStarting) return;
+  if (!scannerRunning) {
+    await startScanner();
+    return;
+  }
   els.cameraRestartButton.disabled = true;
   setStatus("Kamera wird neu gestartet und fokussiert …");
-  await stopScanner();
+  await stopScanner({ message: "Kamera wird neu gestartet …", quiet: true });
+  await wait(500);
   await startScanner();
-  els.cameraRestartButton.disabled = false;
+  updateCameraButton();
 }
 
 async function toggleTorch() {
@@ -1831,14 +1912,20 @@ for (const input of els.resultCard.querySelectorAll("input, select, textarea")) 
 }
 
 window.addEventListener("pagehide", () => {
-  if (recognitionRunning) cancelRecognition("Erkennung unterbrochen.");
+  releaseCameraTracks();
+});
+
+window.addEventListener("beforeunload", () => {
+  releaseCameraTracks();
 });
 
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
-    if (recognitionRunning) cancelRecognition("Erkennung unterbrochen.");
-  } else if (scannerRunning && !reviewInProgress && !lookupInProgress) {
-    resumeScanner();
+    releaseCameraTracks();
+  } else if (!reviewInProgress && !lookupInProgress) {
+    setAutoScanState("Kamera ist aus.");
+    setStatus("Die Kamera wurde beim Verlassen der App freigegeben. Tippe zum Weiterarbeiten auf „Kamera starten“.");
+    updateCameraButton();
   }
 });
 
@@ -1846,7 +1933,10 @@ loadSettings();
 loadBatch();
 renderBatch();
 updatePreview();
-startScanner();
+setAutoScanState("Kamera ist aus.");
+setStatus("Tippe auf „Kamera starten“, um die Vorschau zu öffnen.");
+updateRecognitionControls();
+updateCameraButton();
 
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {

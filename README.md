@@ -1,4 +1,4 @@
-# Buchscanner für Obsidian – v9
+# Buchscanner für Obsidian – v10 – v9
 
 ## Manueller Erkennungslauf
 
@@ -46,3 +46,12 @@ Den Inhalt dieses Ordners in das GitHub-Pages-Repository kopieren und committen.
 - Erkennt außerdem häufige Verwechslungen wie `O → 0`, `I/l → 1`, `S → 5` und `G → 6`.
 - Führt bei Bedarf bis zu drei OCR-Durchläufe mit unterschiedlichen Bildausschnitten und Segmentierungsmodi durch.
 - Die zusätzlichen Bildvarianten sind weiterhin nur temporäre Canvas-Puffer und werden nach jedem Durchlauf freigegeben.
+
+
+## v10: Kamerastart und Freigabe
+
+- Die Kamera startet nicht mehr automatisch beim Laden der PWA, sondern nur nach einem Tippen auf **Kamera starten**.
+- Beim Verlassen, Ausblenden oder Öffnen von Obsidian werden alle Videospuren sofort beendet.
+- Der Start probiert nacheinander hohe Rückkamera-Auflösung, einfachen Rückkameramodus und schließlich den Browser-Standard.
+- Bei `NotReadableError` beziehungsweise `Starting videoinput failed` erscheint eine gezielte Meldung zu einer noch belegten Kamera.
+- Vor einem Neustart wartet die App kurz, damit mobile Browser die Kamerahardware freigeben können.
