@@ -68,8 +68,9 @@ let zoomTimer = null;
 
 const RECOGNITION_ATTEMPTS = 5;
 const RECOGNITION_INTERVAL_MS = 1000;
-const BATCH_STORAGE_KEY = "bookScanner.batch.v10";
+const BATCH_STORAGE_KEY = "bookScanner.batch.v11";
 const LEGACY_BATCH_STORAGE_KEYS = [
+  "bookScanner.batch.v10",
   "bookScanner.batch.v9",
   "bookScanner.batch.v8",
   "bookScanner.batch.v7",
@@ -109,16 +110,12 @@ function isbn13CheckDigitValid(isbn13) {
 
 function normalizeIsbn(value) {
   const raw = String(value ?? "").trim();
-  const compact = raw.replace(/[\s-]/g, "").toUpperCase();
-  if (/^\d{9}[\dX]$/.test(compact)) {
-    return isbn10CheckDigitValid(compact) ? isbn10To13(compact) : compact;
-  }
-  return digitsOnly(compact);
+  return raw.replace(/[\s-]/g, "").toUpperCase();
 }
 
 function isbn10To13(isbn10) {
-  const compact = String(isbn10 ?? "").toUpperCase();
-  if (!isbn10CheckDigitValid(compact)) return compact;
+  const compact = normalizeIsbn(isbn10);
+  if (!isbn10CheckDigitValid(compact)) return "";
   const body = `978${compact.slice(0, 9)}`;
   const sum = [...body].reduce(
     (total, digit, index) => total + Number(digit) * (index % 2 === 0 ? 1 : 3),
@@ -127,10 +124,48 @@ function isbn10To13(isbn10) {
   return `${body}${(10 - (sum % 10)) % 10}`;
 }
 
+function isbn13To10(isbn13) {
+  const compact = normalizeIsbn(isbn13);
+  if (!isbn13CheckDigitValid(compact) || !compact.startsWith("978")) return "";
+  const body = compact.slice(3, 12);
+  const sum = [...body].reduce(
+    (total, digit, index) => total + Number(digit) * (10 - index),
+    0
+  );
+  const checkValue = (11 - (sum % 11)) % 11;
+  const checkDigit = checkValue === 10 ? "X" : String(checkValue);
+  return `${body}${checkDigit}`;
+}
+
 function isBookIsbn(isbn) {
-  return /^\d{13}$/.test(isbn) &&
-    (isbn.startsWith("978") || isbn.startsWith("979")) &&
-    isbn13CheckDigitValid(isbn);
+  const compact = normalizeIsbn(isbn);
+  if (isbn10CheckDigitValid(compact)) return true;
+  return /^\d{13}$/.test(compact) &&
+    (compact.startsWith("978") || compact.startsWith("979")) &&
+    isbn13CheckDigitValid(compact);
+}
+
+function isbnForms(value) {
+  const primary = normalizeIsbn(value);
+  let isbn10 = "";
+  let isbn13 = "";
+
+  if (isbn10CheckDigitValid(primary)) {
+    isbn10 = primary;
+    isbn13 = isbn10To13(primary);
+  } else if (/^\d{13}$/.test(primary) && isbn13CheckDigitValid(primary)) {
+    isbn13 = primary;
+    isbn10 = isbn13To10(primary);
+  }
+
+  const candidates = [...new Set([primary, isbn10, isbn13].filter(Boolean))];
+  return { primary, isbn10, isbn13, candidates };
+}
+
+function isbnEquivalent(left, right) {
+  const leftForms = isbnForms(left).candidates;
+  const rightSet = new Set(isbnForms(right).candidates);
+  return leftForms.some((candidate) => rightSet.has(candidate));
 }
 
 function barcodeFormatName(decodedResult) {
@@ -245,8 +280,12 @@ function buildMarkdown(book = getFormData()) {
   appendYamlList(lines, "genres", book.genres ?? []);
   appendYamlList(lines, "subjects", book.subjects ?? []);
 
+  const forms = isbnForms(book.isbn);
+
   lines.push(
-    `isbn_13: ${yamlString(book.isbn)}`,
+    `isbn: ${yamlString(forms.primary)}`,
+    `isbn_10: ${yamlString(forms.isbn10)}`,
+    `isbn_13: ${yamlString(forms.isbn13)}`,
     `publisher: ${yamlString(book.publisher)}`,
     `publication_date: ${yamlString(book.publishedDate)}`,
     `pages: ${book.pages || "null"}`,
@@ -436,7 +475,7 @@ async function lookupOpenLibrary(isbn) {
 function selectBestGoogleVolume(items, isbn) {
   return items.find((item) =>
     (item.volumeInfo?.industryIdentifiers ?? [])
-      .some((entry) => digitsOnly(entry.identifier) === isbn)
+      .some((entry) => isbnEquivalent(entry.identifier, isbn))
   ) ?? items[0];
 }
 
@@ -483,13 +522,14 @@ function applyBookData(isbn, book) {
 }
 
 async function lookupBook(rawIsbn) {
-  const isbn = normalizeIsbn(rawIsbn);
+  const forms = isbnForms(rawIsbn);
+  const isbn = forms.primary;
 
   if (!isBookIsbn(isbn)) {
     setStatus("Bitte eine gültige ISBN-10 oder ISBN-13 eines Buches eingeben.", "error");
     return;
   }
-  const duplicate = batch.find((book) => book.isbn === isbn && book.id !== editingBatchId);
+  const duplicate = batch.find((book) => isbnEquivalent(book.isbn, isbn) && book.id !== editingBatchId);
   if (duplicate) {
     setStatus(`ISBN ${isbn} befindet sich bereits im Stapel.`, "error");
     renderBatch();
@@ -504,34 +544,41 @@ async function lookupBook(rawIsbn) {
   setStatus(`Suche ISBN ${isbn} zuerst bei Open Library …`);
 
   const errors = [];
+  const candidates = forms.candidates;
 
   try {
-    try {
-      const openLibraryBook = await lookupOpenLibrary(isbn);
-      applyBookData(isbn, openLibraryBook);
-      els.resultCard.scrollIntoView({ behavior: "smooth", block: "start" });
-      setStatus(`Treffer für ISBN ${isbn} über Open Library geladen.`, "success");
-      return;
-    } catch (error) {
-      errors.push(error.message);
-      console.warn(error);
+    for (const candidate of candidates) {
+      try {
+        const openLibraryBook = await lookupOpenLibrary(candidate);
+        applyBookData(isbn, openLibraryBook);
+        els.resultCard.scrollIntoView({ behavior: "smooth", block: "start" });
+        const fallbackNote = candidate === isbn ? "" : ` (über äquivalente ISBN ${candidate})`;
+        setStatus(`Treffer für ISBN ${isbn} über Open Library geladen${fallbackNote}.`, "success");
+        return;
+      } catch (error) {
+        errors.push(`Open Library ${candidate}: ${error.message}`);
+        console.warn(error);
+      }
     }
 
     const apiKey = els.googleApiKey.value.trim();
     if (apiKey) {
       setStatus("Open Library hatte keinen nutzbaren Treffer. Versuche Google Books …");
-      try {
-        const googleBook = await lookupGoogleBooks(isbn, apiKey);
-        if (googleBook) {
-          applyBookData(isbn, googleBook);
-          els.resultCard.scrollIntoView({ behavior: "smooth", block: "start" });
-          setStatus(`Treffer für ISBN ${isbn} über Google Books geladen.`, "success");
-          return;
+      for (const candidate of candidates) {
+        try {
+          const googleBook = await lookupGoogleBooks(candidate, apiKey);
+          if (googleBook) {
+            applyBookData(isbn, googleBook);
+            els.resultCard.scrollIntoView({ behavior: "smooth", block: "start" });
+            const fallbackNote = candidate === isbn ? "" : ` (über äquivalente ISBN ${candidate})`;
+            setStatus(`Treffer für ISBN ${isbn} über Google Books geladen${fallbackNote}.`, "success");
+            return;
+          }
+          errors.push(`Google Books ${candidate}: kein Treffer`);
+        } catch (error) {
+          errors.push(`Google Books ${candidate}: ${error.message}`);
+          console.warn(error);
         }
-        errors.push("Google Books: kein Treffer");
-      } catch (error) {
-        errors.push(error.message);
-        console.warn(error);
       }
     } else {
       errors.push("Google Books nicht versucht: kein API-Key hinterlegt");
@@ -682,7 +729,7 @@ function addCurrentBookToBatch() {
     return;
   }
 
-  const duplicate = batch.find((entry) => entry.isbn === book.isbn && entry.id !== editingBatchId);
+  const duplicate = batch.find((entry) => isbnEquivalent(entry.isbn, book.isbn) && entry.id !== editingBatchId);
   if (duplicate) {
     setStatus(`ISBN ${book.isbn} befindet sich bereits im Stapel.`, "error");
     return;
@@ -1066,7 +1113,7 @@ function validIsbnFromOcrCandidate(candidate) {
     for (let start = 0; start <= stream.length - targetLength; start += 1) {
       const windowText = stream.slice(start, start + targetLength);
       for (const variant of expandOcrWindow(windowText, targetLength)) {
-        if (targetLength === 10 && isbn10CheckDigitValid(variant)) return isbn10To13(variant);
+        if (targetLength === 10 && isbn10CheckDigitValid(variant)) return variant;
         if (targetLength === 13 && isBookIsbn(variant)) return variant;
       }
     }

@@ -1,57 +1,45 @@
-# Buchscanner für Obsidian – v10 – v9
+# Buchscanner für Obsidian – v11
 
-## Manueller Erkennungslauf
+## ISBN-10 bleibt ISBN-10
 
-Die Kamera läuft nur als Vorschau. Es gibt keinen automatischen oder wiederkehrenden Scanzyklus mehr.
+Eine erkannte oder manuell eingegebene ISBN wird nicht mehr zwangsweise in ISBN-13 umgewandelt.
 
-1. Buch und ISBN-Bereich in der Kameravorschau ausrichten.
+Beispiel:
+
+- erkannt/eingegeben: `0451160916`
+- erster Open-Library-Aufruf: `/isbn/0451160916.json`
+- nur falls dort kein Treffer kommt, wird zusätzlich die äquivalente ISBN-13 `9780451160911` als Fallback versucht.
+
+Das gleiche gilt umgekehrt für eine ISBN-13 mit `978`-Präfix: Sie bleibt primär erhalten; die berechenbare ISBN-10 wird nur als Such-Fallback verwendet.
+
+## OCR
+
+Die OCR gibt eine gültige zehnstellige ISBN jetzt direkt zurück. Sie wird vor der Metadatensuche nicht mehr in ISBN-13 umgewandelt. Typische Zeichenverwechslungen werden weiterhin über die Prüfziffer aufgelöst.
+
+## Obsidian-Frontmatter
+
+Die ursprüngliche ISBN und beide verfügbaren Formen werden getrennt gespeichert:
+
+```yaml
+isbn: "0451160916"
+isbn_10: "0451160916"
+isbn_13: "9780451160911"
+```
+
+Bei einer ISBN-13 mit `979` kann in der Regel keine ISBN-10 abgeleitet werden; `isbn_10` bleibt dann leer.
+
+## Dubletten
+
+ISBN-10 und die äquivalente ISBN-13 gelten im Stapel als dasselbe Buch. Dadurch kann dieselbe Ausgabe nicht einmal als ISBN-10 und ein zweites Mal als ISBN-13 hinzugefügt werden.
+
+## Erkennungslauf
+
+1. Kamera manuell starten.
 2. **Erkennung starten** drücken.
-3. Die App versucht bis zu fünfmal, ungefähr einmal pro Sekunde, einen ISBN-Barcode zu lesen.
-4. Ein gültiger ISBN-Barcode beendet den Lauf sofort und lädt die Metadaten.
-5. Reine Handelsbarcodes wie UPC-A werden registriert, gelten aber nicht als ISBN-Treffer.
-6. Bleiben alle fünf Versuche ohne ISBN, wird ein frisches hochauflösendes Bild einmal per OCR auf eine gedruckte ISBN geprüft.
-7. Nach Erfolg oder Misserfolg endet der Lauf vollständig. Der nächste Lauf beginnt ausschließlich durch einen erneuten Tastendruck.
-
-## Nach einem Treffer
-
-Nach der Prüfung kann das Buch entweder:
-
-- direkt per Obsidian-URI in den Vault übertragen werden oder
-- zum lokalen Stapel hinzugefügt werden.
-
-Beide Wege setzen das Eingabeformular anschließend für das nächste Buch zurück. Danach kann der nächste Erkennungslauf manuell gestartet werden.
-
-## Temporäre Bilder
-
-Kameraaufnahmen werden nicht in `localStorage`, IndexedDB, dem Service-Worker-Cache oder dem Stapel gespeichert. Jeder Barcodeversuch verwendet ein frisches temporäres Canvas. Nach der Auswertung werden Canvas-Puffer geleert und auf 1 × 1 Pixel zurückgesetzt. Temporäre Blob-URLs werden unmittelbar widerrufen; importierte Fotoverweise werden nach der Auswertung entfernt. Dauerhaft gespeichert werden nur Einstellungen und Buchdatensätze des Stapels.
-
-## Weitere Funktionen
-
-- separate Schaltfläche **ISBN-Text lesen**
-- Foto-Import als Fallback
-- Open Library mit Werk-Schlagwörtern und Genre-Vorschlägen
-- optionaler Google-Books-Fallback
-- direkter Obsidian-Export
-- Stapel, schrittweiser Obsidian-Export und ZIP-Export
+3. Fünf Barcodeversuche im Abstand von etwa einer Sekunde.
+4. Danach einmalige ISBN-Texterkennung.
+5. Nach Erfolg oder Misserfolg vollständiger Stopp.
 
 ## Veröffentlichung
 
-Den Inhalt dieses Ordners in das GitHub-Pages-Repository kopieren und committen. Die Seite anschließend einmal mit `?v=9` öffnen. Bei alter Oberfläche die installierte PWA entfernen und die Website-Daten löschen.
-
-
-## Verbesserte ISBN-Texterkennung in v9
-
-- Behandelt typische OCR-Verwechslungen kontextabhängig, insbesondere `b/B → 6 oder 8`.
-- Nutzt die ISBN-Prüfziffer, um aus mehreren möglichen Ziffernfolgen die gültige ISBN auszuwählen.
-- Erkennt außerdem häufige Verwechslungen wie `O → 0`, `I/l → 1`, `S → 5` und `G → 6`.
-- Führt bei Bedarf bis zu drei OCR-Durchläufe mit unterschiedlichen Bildausschnitten und Segmentierungsmodi durch.
-- Die zusätzlichen Bildvarianten sind weiterhin nur temporäre Canvas-Puffer und werden nach jedem Durchlauf freigegeben.
-
-
-## v10: Kamerastart und Freigabe
-
-- Die Kamera startet nicht mehr automatisch beim Laden der PWA, sondern nur nach einem Tippen auf **Kamera starten**.
-- Beim Verlassen, Ausblenden oder Öffnen von Obsidian werden alle Videospuren sofort beendet.
-- Der Start probiert nacheinander hohe Rückkamera-Auflösung, einfachen Rückkameramodus und schließlich den Browser-Standard.
-- Bei `NotReadableError` beziehungsweise `Starting videoinput failed` erscheint eine gezielte Meldung zu einer noch belegten Kamera.
-- Vor einem Neustart wartet die App kurz, damit mobile Browser die Kamerahardware freigeben können.
+Alle Dateien in das GitHub-Pages-Repository übernehmen und die Seite einmal mit `?v=11` öffnen. Falls noch die alte Version erscheint, die installierte PWA und die Website-Daten entfernen und anschließend neu installieren.
