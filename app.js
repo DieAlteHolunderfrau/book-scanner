@@ -297,15 +297,13 @@ function buildMarkdown(book = getFormData()) {
     `metadata_source: ${book.metadataSource || "manual"}`,
     "---",
     "",
-    `# ${book.title}`,
+    "# Leseverlauf",
     "",
-    "## Leseverlauf",
+    "# Notizen",
     "",
-    "## Notizen",
+    "# Zitate",
     "",
-    "## Zitate",
-    "",
-    "## Eindruck",
+    "# Eindruck",
     ""
   );
 
@@ -641,7 +639,7 @@ function setQueueStatus(message, kind = "") {
 function bookFilename(book) {
   const titlePart = safeFilename(book.title) || "Unbenanntes Buch";
   const authorPart = book.authors?.[0] ? ` - ${safeFilename(book.authors[0])}` : "";
-  return `${book.isbn} - ${titlePart}${authorPart}.md`;
+  return `${titlePart}.md`;
 }
 
 function bookVaultPath(book) {
