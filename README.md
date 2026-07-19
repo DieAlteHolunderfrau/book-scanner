@@ -1,27 +1,39 @@
-# Buchscanner für Obsidian – v7
+# Buchscanner für Obsidian – v8
 
-## Automatische Erkennung
+## Manueller Erkennungslauf
 
-- alle 2 Sekunden genau eine Barcodeprüfung
-- nach zwei erfolglosen Barcodeprüfungen automatisch eine OCR-Prüfung
-- native `BarcodeDetector`-API, wenn der Browser sie bereitstellt
-- Quagga2 als EAN-/UPC-Fallback für einzelne Standbilder
-- weiterhin manuelle ISBN-Texterkennung und Foto-Import
-- Bulk-Warteschlange und Obsidian-/ZIP-Export aus v6 bleiben erhalten
+Die Kamera läuft nur als Vorschau. Es gibt keinen automatischen oder wiederkehrenden Scanzyklus mehr.
 
-## Temporäre Bilder und Speicher
+1. Buch und ISBN-Bereich in der Kameravorschau ausrichten.
+2. **Erkennung starten** drücken.
+3. Die App versucht bis zu fünfmal, ungefähr einmal pro Sekunde, einen ISBN-Barcode zu lesen.
+4. Ein gültiger ISBN-Barcode beendet den Lauf sofort und lädt die Metadaten.
+5. Reine Handelsbarcodes wie UPC-A werden registriert, gelten aber nicht als ISBN-Treffer.
+6. Bleiben alle fünf Versuche ohne ISBN, wird ein frisches hochauflösendes Bild einmal per OCR auf eine gedruckte ISBN geprüft.
+7. Nach Erfolg oder Misserfolg endet der Lauf vollständig. Der nächste Lauf beginnt ausschließlich durch einen erneuten Tastendruck.
 
-Kameraaufnahmen werden nicht in `localStorage`, IndexedDB oder im Service-Worker-Cache gespeichert. Für jede Prüfung wird nur ein temporäres Canvas im Arbeitsspeicher erzeugt. Danach werden Canvas-Puffer geleert, Bild-Bitmaps geschlossen, Blob-URLs widerrufen und File-Input-Verweise zurückgesetzt. Dauerhaft gespeichert werden nur Einstellungen und Buchdatensätze des Stapels.
+## Nach einem Treffer
 
-## Ablauf
+Nach der Prüfung kann das Buch entweder:
 
-1. Kamera starten.
-2. Nach 2 Sekunden Barcodeprüfung 1/2.
-3. Nach weiteren 2 Sekunden Barcodeprüfung 2/2.
-4. Bleiben beide erfolglos, wird dasselbe zweite Standbild per OCR nach einer gedruckten ISBN durchsucht.
-5. Danach beginnt der Zyklus erneut.
-6. Sobald eine ISBN erkannt wurde, pausiert die Automatik bis das Buch geprüft und zum Stapel hinzugefügt wurde.
+- direkt per Obsidian-URI in den Vault übertragen werden oder
+- zum lokalen Stapel hinzugefügt werden.
+
+Beide Wege setzen das Eingabeformular anschließend für das nächste Buch zurück. Danach kann der nächste Erkennungslauf manuell gestartet werden.
+
+## Temporäre Bilder
+
+Kameraaufnahmen werden nicht in `localStorage`, IndexedDB, dem Service-Worker-Cache oder dem Stapel gespeichert. Jeder Barcodeversuch verwendet ein frisches temporäres Canvas. Nach der Auswertung werden Canvas-Puffer geleert und auf 1 × 1 Pixel zurückgesetzt. Temporäre Blob-URLs werden unmittelbar widerrufen; importierte Fotoverweise werden nach der Auswertung entfernt. Dauerhaft gespeichert werden nur Einstellungen und Buchdatensätze des Stapels.
+
+## Weitere Funktionen
+
+- separate Schaltfläche **ISBN-Text lesen**
+- Foto-Import als Fallback
+- Open Library mit Werk-Schlagwörtern und Genre-Vorschlägen
+- optionaler Google-Books-Fallback
+- direkter Obsidian-Export
+- Stapel, schrittweiser Obsidian-Export und ZIP-Export
 
 ## Veröffentlichung
 
-Den Inhalt dieses Ordners in das GitHub-Pages-Repository kopieren, committen und die Seite einmal mit `?v=7` öffnen. Bei alter Oberfläche die installierte PWA entfernen und die Website-Daten löschen.
+Den Inhalt dieses Ordners in das GitHub-Pages-Repository kopieren und committen. Die Seite anschließend einmal mit `?v=8` öffnen. Bei alter Oberfläche die installierte PWA entfernen und die Website-Daten löschen.

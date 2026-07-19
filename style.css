@@ -343,3 +343,15 @@ button.danger {
   font-size: .76rem;
   font-weight: 750;
 }
+
+
+/* Scanner v8: ausschließlich manuell gestartete Erkennungsläufe. */
+.recognition-button {
+  margin-top: 12px;
+  min-height: 56px;
+  font-size: 1.02rem;
+}
+
+.recognition-button:disabled {
+  opacity: .62;
+}

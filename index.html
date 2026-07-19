@@ -49,6 +49,8 @@
       </div>
       <p id="auto-scan-state" class="auto-scan-state" aria-live="polite">Kamera wird vorbereitet …</p>
 
+      <button id="recognition-button" type="button" class="primary recognition-button" disabled>Erkennung starten</button>
+
       <div class="scanner-toolbar">
         <button id="camera-restart-button" type="button">Kamera neu fokussieren</button>
         <button id="torch-button" type="button" class="hidden">Licht einschalten</button>
@@ -64,7 +66,7 @@
         <input id="zoom-slider" type="range" min="1" max="1" step="0.1" value="1">
       </div>
 
-      <p class="hint scanner-hint">Alle zwei Sekunden wird ein einzelnes Kamerabild auf EAN/UPC geprüft. Nach zwei erfolglosen Barcodeprüfungen folgt automatisch OCR. Die temporären Bilder bleiben nur im Arbeitsspeicher und werden direkt nach der Auswertung freigegeben; gespeichert werden ausschließlich Buchdaten und der Stapel.</p>
+      <p class="hint scanner-hint">Die Kamera läuft zunächst nur als Vorschau. Nach „Erkennung starten“ werden fünf Sekunden lang bis zu fünf frische Kamerabilder auf ISBN-Barcodes geprüft. Bleibt das ohne Treffer, folgt genau eine ISBN-Texterkennung. Danach endet der Lauf vollständig. Temporäre Bilder bleiben nur im Arbeitsspeicher und werden nach jeder Auswertung freigegeben.</p>
 
       <div class="manual">
         <label>ISBN manuell
@@ -157,6 +159,6 @@
   </main>
   <script src="https://cdn.jsdelivr.net/npm/@ericblade/quagga2@1.12.1/dist/quagga.min.js"
           crossorigin="anonymous" referrerpolicy="no-referrer"></script>
-  <script src="./app.js"></script>
+  <script src="./app.js?v=8"></script>
 </body>
 </html>

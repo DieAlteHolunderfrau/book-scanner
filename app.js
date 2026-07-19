@@ -6,6 +6,7 @@ const els = {
   lookupButton: document.querySelector("#lookup-button"),
   cameraVideo: document.querySelector("#camera-video"),
   autoScanState: document.querySelector("#auto-scan-state"),
+  recognitionButton: document.querySelector("#recognition-button"),
   cameraRestartButton: document.querySelector("#camera-restart-button"),
   torchButton: document.querySelector("#torch-button"),
   ocrButton: document.querySelector("#ocr-button"),
@@ -60,17 +61,16 @@ let ocrWorker = null;
 let ocrInProgress = false;
 let scannerRunning = false;
 let scannerStarting = null;
-let autoScanPaused = false;
-let autoScanTimer = null;
-let autoScanCycleRunning = false;
-let consecutiveBarcodeMisses = 0;
+let recognitionRunning = false;
+let recognitionRunId = 0;
 let torchOn = false;
 let zoomTimer = null;
 
-const AUTO_SCAN_INTERVAL_MS = 2000;
-const BARCODE_MISSES_BEFORE_OCR = 2;
-const BATCH_STORAGE_KEY = "bookScanner.batch.v7";
+const RECOGNITION_ATTEMPTS = 5;
+const RECOGNITION_INTERVAL_MS = 1000;
+const BATCH_STORAGE_KEY = "bookScanner.batch.v8";
 const LEGACY_BATCH_STORAGE_KEYS = [
+  "bookScanner.batch.v7",
   "bookScanner.batch.v6",
   "bookScanner.batch.v5",
   "bookScanner.batch.v4",
@@ -477,6 +477,7 @@ function applyBookData(isbn, book) {
   reviewInProgress = true;
   els.resultCard.classList.remove("hidden");
   updatePreview();
+  updateRecognitionControls();
 }
 
 async function lookupBook(rawIsbn) {
@@ -497,6 +498,7 @@ async function lookupBook(rawIsbn) {
 
   lookupInProgress = true;
   els.lookupButton.disabled = true;
+  updateRecognitionControls();
   setStatus(`Suche ISBN ${isbn} zuerst bei Open Library …`);
 
   const errors = [];
@@ -539,6 +541,7 @@ async function lookupBook(rawIsbn) {
   } finally {
     lookupInProgress = false;
     els.lookupButton.disabled = false;
+    updateRecognitionControls();
   }
 }
 
@@ -666,6 +669,7 @@ function resetFormForNextScan() {
   els.batchButton.textContent = "Zum Stapel hinzufügen & weiter";
   reviewInProgress = false;
   updatePreview();
+  updateRecognitionControls();
   ensureScannerReady();
 }
 
@@ -749,7 +753,7 @@ function buildObsidianUri(book) {
     `&content=${encodeURIComponent(buildMarkdown(book))}`;
 }
 
-function openBookInObsidian(book, markExported = false) {
+function openBookInObsidian(book, markExported = false, clearCurrent = false) {
   saveSettings();
   let uri;
   try {
@@ -767,6 +771,7 @@ function openBookInObsidian(book, markExported = false) {
     renderBatch();
     setQueueStatus(`„${book.title}“ wird an Obsidian übergeben. Kehre danach für das nächste Buch zurück.`, "success");
   }
+  if (clearCurrent) resetFormForNextScan();
   window.location.href = uri;
 }
 
@@ -916,7 +921,7 @@ function openInObsidian() {
     setStatus("Titel und gültige ISBN müssen vorhanden sein.", "error");
     return;
   }
-  openBookInObsidian(book, false);
+  openBookInObsidian(book, false, true);
 }
 
 async function copyMarkdown() {
@@ -1270,160 +1275,208 @@ async function recognizeIsbnFromImage(source) {
     disposeCanvas(ocrCanvas);
     if (ownCanvas) disposeCanvas(canvas);
     ocrInProgress = false;
-    els.ocrButton.disabled = false;
     els.ocrButton.classList.remove("busy");
+    updateRecognitionControls();
   }
 }
 
-function clearAutoScanTimer() {
-  if (autoScanTimer) window.clearTimeout(autoScanTimer);
-  autoScanTimer = null;
+function wait(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
-function pauseAutoScanner(message = "Automatik pausiert.") {
-  autoScanPaused = true;
-  clearAutoScanTimer();
+function updateRecognitionControls() {
+  const unavailable = !scannerRunning || recognitionRunning || reviewInProgress || lookupInProgress || ocrInProgress;
+  els.recognitionButton.disabled = unavailable;
+  els.recognitionButton.textContent = recognitionRunning ? "Erkennung läuft …" : "Erkennung starten";
+  els.lookupButton.disabled = lookupInProgress || recognitionRunning || ocrInProgress;
+  els.ocrButton.disabled = unavailable;
+  els.photoInput.disabled = recognitionRunning || reviewInProgress || lookupInProgress || ocrInProgress;
+}
+
+function finishRecognition(message = "Bereit – Erkennung manuell starten.", kind = "") {
+  recognitionRunning = false;
   setAutoScanState(message);
+  updateRecognitionControls();
+  if (kind) setStatus(message, kind);
 }
 
-function scheduleAutoScan(delay = AUTO_SCAN_INTERVAL_MS) {
-  clearAutoScanTimer();
-  if (!scannerRunning || autoScanPaused || reviewInProgress || lookupInProgress) return;
-  setAutoScanState(`Nächste Barcodeprüfung in ${Math.round(delay / 1000)} s`);
-  autoScanTimer = window.setTimeout(runAutoScanCycle, delay);
+function cancelRecognition(message = "Erkennung abgebrochen.") {
+  recognitionRunId += 1;
+  recognitionRunning = false;
+  setAutoScanState(message);
+  updateRecognitionControls();
+}
+
+async function waitForAttemptSlot(startedAt, attemptIndex, runId) {
+  const target = startedAt + attemptIndex * RECOGNITION_INTERVAL_MS;
+  const remaining = target - performance.now();
+  if (remaining > 0) await wait(remaining);
+  return runId === recognitionRunId;
 }
 
 async function lookupRecognizedIsbn(isbn, sourceLabel = "Texterkennung") {
   if (!isBookIsbn(isbn)) return false;
-  pauseAutoScanner("Buch erkannt – Prüfung pausiert.");
+  recognitionRunning = false;
+  updateRecognitionControls();
+  setAutoScanState("Buch erkannt – Metadaten werden geladen.");
   if (navigator.vibrate) navigator.vibrate([40, 35, 40]);
   els.manualIsbn.value = isbn;
   setStatus(`${sourceLabel}: ISBN ${isbn} erkannt. Metadaten werden geladen …`, "success");
   await lookupBook(isbn);
+  updateRecognitionControls();
   return true;
 }
 
 async function handleDecodedBarcode(decodedText, decodedResult = null, sourceImage = null) {
-  if (reviewInProgress || lookupInProgress || ocrInProgress) return;
+  if (reviewInProgress || lookupInProgress || ocrInProgress) return false;
 
   const classification = classifyBarcode(decodedText, decodedResult);
   const dedupeKey = `${classification.type}:${classification.isbn || classification.barcode}`;
-  if (dedupeKey === lastScanned) return;
+  if (dedupeKey === lastScanned) return false;
   lastScanned = dedupeKey;
   window.setTimeout(() => { lastScanned = ""; }, 3000);
-  pauseAutoScanner("Barcode erkannt – Prüfung pausiert.");
 
   if (classification.type === "isbn") {
     if (navigator.vibrate) navigator.vibrate(45);
-    els.manualIsbn.value = classification.isbn;
-    await lookupBook(classification.isbn);
-    if (!reviewInProgress) resumeScanner();
-    return;
+    disposeCanvas(sourceImage);
+    await lookupRecognizedIsbn(classification.isbn, "Barcode");
+    return true;
   }
 
   if (classification.type === "retail") {
-    setStatus(`Handelsbarcode ${classification.barcode} erkannt. Die aufgedruckte ISBN wird gelesen …`);
+    setStatus(`Handelsbarcode ${classification.barcode} erkannt. Suche nach einer gedruckten ISBN …`);
     const isbn = sourceImage ? await recognizeIsbnFromImage(sourceImage) : "";
     if (isbn) {
       disposeCanvas(sourceImage);
-      sourceImage = null;
       await lookupRecognizedIsbn(isbn, "ISBN-Text");
-    } else {
-      setStatus(`Handelsbarcode ${classification.barcode} erkannt, aber keine gedruckte ISBN gefunden. Nutze „ISBN-Text lesen“ oder die manuelle Eingabe.`, "error");
-      resumeScanner();
+      return true;
     }
-    return;
+    setStatus(`Handelsbarcode ${classification.barcode} erkannt, aber keine gedruckte ISBN gefunden.`, "error");
+    return false;
   }
 
-  setStatus(`Barcode ${decodedText} erkannt, aber nicht als ISBN oder unterstützter Handelsbarcode eingeordnet.`, "error");
-  resumeScanner();
+  setStatus(`Barcode ${decodedText} erkannt, aber nicht als ISBN eingeordnet.`, "error");
+  return false;
 }
 
-async function runAutoScanCycle() {
-  clearAutoScanTimer();
-  if (
-    !scannerRunning || autoScanPaused || reviewInProgress || lookupInProgress ||
-    ocrInProgress || autoScanCycleRunning
-  ) {
-    scheduleAutoScan();
-    return;
+async function startRecognitionRun() {
+  if (recognitionRunning || reviewInProgress || lookupInProgress || ocrInProgress) return;
+  if (!scannerRunning) {
+    await startScanner();
+    if (!scannerRunning) return;
   }
 
-  autoScanCycleRunning = true;
-  let frame = null;
+  recognitionRunning = true;
+  const runId = ++recognitionRunId;
+  const startedAt = performance.now();
+  let lastRetailBarcode = "";
+  updateRecognitionControls();
+  setAutoScanState(`Barcodeprüfung 1/${RECOGNITION_ATTEMPTS}`);
+  setStatus("Erkennung gestartet. Halte den Barcode möglichst frontal in den Rahmen …");
+
   try {
-    frame = await captureFrameCanvas();
-    if (!frame) {
-      setStatus("Noch kein stabiles Kamerabild verfügbar.");
-      return;
-    }
+    for (let attempt = 1; attempt <= RECOGNITION_ATTEMPTS; attempt += 1) {
+      if (!(await waitForAttemptSlot(startedAt, attempt - 1, runId))) return;
 
-    setAutoScanState(`Barcodeprüfung ${consecutiveBarcodeMisses + 1}/${BARCODE_MISSES_BEFORE_OCR}`);
-    setStatus("Automatische Barcodeprüfung läuft …");
-    const decoded = await scanBarcodeFromCanvas(frame);
+      setAutoScanState(`Barcodeprüfung ${attempt}/${RECOGNITION_ATTEMPTS}`);
+      setStatus(`Barcodeprüfung ${attempt}/${RECOGNITION_ATTEMPTS} …`);
+      let frame = null;
+      try {
+        frame = await captureFrameCanvas();
+        if (!frame) {
+          setStatus(`Kein stabiles Kamerabild bei Versuch ${attempt}/${RECOGNITION_ATTEMPTS}.`);
+          continue;
+        }
 
-    if (decoded) {
-      consecutiveBarcodeMisses = 0;
-      const classification = classifyBarcode(decoded.decodedText, decoded.decodedResult);
-      if (classification.type === "isbn") {
-        // Für einen direkten ISBN-Treffer wird das Bild vor dem Netzwerkabruf freigegeben.
+        const decoded = await scanBarcodeFromCanvas(frame);
+        if (runId !== recognitionRunId) return;
+        if (!decoded) continue;
+
+        const classification = classifyBarcode(decoded.decodedText, decoded.decodedResult);
+        if (classification.type === "isbn") {
+          const isbn = classification.isbn;
+          disposeCanvas(frame);
+          frame = null;
+          await lookupRecognizedIsbn(isbn, "Barcode");
+          return;
+        }
+
+        if (classification.type === "retail") {
+          lastRetailBarcode = classification.barcode;
+          setStatus(`Handelsbarcode ${classification.barcode} erkannt; kein ISBN-Barcode. Weitere Versuche laufen …`);
+        }
+      } finally {
         disposeCanvas(frame);
-        frame = null;
       }
-      await handleDecodedBarcode(decoded.decodedText, decoded.decodedResult, frame);
-      return;
     }
 
-    consecutiveBarcodeMisses += 1;
-    if (consecutiveBarcodeMisses < BARCODE_MISSES_BEFORE_OCR) {
-      setStatus("Kein Barcode erkannt (1/2). Nächster Versuch in zwei Sekunden.");
-      return;
+    if (runId !== recognitionRunId) return;
+    setAutoScanState("Kein ISBN-Barcode – ISBN-Text wird gelesen");
+    setStatus(lastRetailBarcode
+      ? `Nur Handelsbarcode ${lastRetailBarcode} erkannt. Die gedruckte ISBN wird jetzt gelesen …`
+      : "Kein ISBN-Barcode erkannt. Die gedruckte ISBN wird jetzt gelesen …");
+
+    let ocrFrame = null;
+    try {
+      ocrFrame = await captureFrameCanvas({ preferPhoto: true });
+      if (!ocrFrame) {
+        finishRecognition("Kein Kamerabild für OCR verfügbar.");
+        setStatus("Kein Kamerabild für die ISBN-Texterkennung verfügbar.", "error");
+        return;
+      }
+      const isbn = await recognizeIsbnFromImage(ocrFrame);
+      disposeCanvas(ocrFrame);
+      ocrFrame = null;
+      if (runId !== recognitionRunId) return;
+      if (isbn) {
+        await lookupRecognizedIsbn(isbn, "ISBN-Text");
+        return;
+      }
+    } finally {
+      disposeCanvas(ocrFrame);
     }
 
-    consecutiveBarcodeMisses = 0;
-    setAutoScanState("Zweimal kein Barcode – OCR läuft");
-    setStatus("Zweimal kein Barcode erkannt. Die aufgedruckte ISBN wird jetzt gelesen …");
-    const isbn = await recognizeIsbnFromImage(frame);
-    if (isbn) {
-      // Das Bild ist nach der OCR nicht mehr nötig und wird vor dem Metadatenabruf freigegeben.
-      disposeCanvas(frame);
-      frame = null;
-      await lookupRecognizedIsbn(isbn, "Automatische OCR");
-      return;
-    }
-    setStatus("Noch kein Treffer. Die nächste Barcodeprüfung startet in zwei Sekunden.");
+    finishRecognition("Kein Treffer – erneut starten oder ISBN manuell eingeben.");
+    setStatus("Weder ISBN-Barcode noch gültige gedruckte ISBN erkannt. Richte Barcode und ISBN-Zeile frontal aus und starte erneut.", "error");
   } catch (error) {
-    console.warn("Automatischer Scanzyklus fehlgeschlagen:", error);
-    setStatus(`Automatische Erkennung fehlgeschlagen: ${error.message || error}`, "error");
+    console.warn("Manueller Erkennungslauf fehlgeschlagen:", error);
+    if (runId === recognitionRunId) {
+      finishRecognition("Erkennung fehlgeschlagen.");
+      setStatus(`Erkennung fehlgeschlagen: ${error.message || error}`, "error");
+    }
   } finally {
-    disposeCanvas(frame);
-    frame = null;
-    autoScanCycleRunning = false;
-    if (!reviewInProgress && !lookupInProgress && !autoScanPaused) scheduleAutoScan();
+    if (runId === recognitionRunId && !reviewInProgress && !lookupInProgress && recognitionRunning) {
+      finishRecognition();
+    }
   }
 }
 
 async function scanPrintedIsbnFromCamera() {
-  if (ocrInProgress || lookupInProgress || reviewInProgress) return;
-  pauseAutoScanner("Manuelle ISBN-Texterkennung läuft.");
+  if (ocrInProgress || lookupInProgress || reviewInProgress || recognitionRunning) return;
+  recognitionRunning = true;
+  const runId = ++recognitionRunId;
+  updateRecognitionControls();
+  setAutoScanState("ISBN-Texterkennung läuft");
   let frame = null;
   try {
     frame = await captureFrameCanvas({ preferPhoto: true });
     if (!frame) {
+      finishRecognition("Bereit – Erkennung manuell starten.");
       setStatus("Kein Kamerabild verfügbar. Nutze stattdessen „Foto scannen“.", "error");
-      resumeScanner();
       return;
     }
     const isbn = await recognizeIsbnFromImage(frame);
     disposeCanvas(frame);
     frame = null;
+    if (runId !== recognitionRunId) return;
     if (isbn) await lookupRecognizedIsbn(isbn);
     else {
+      finishRecognition("Kein ISBN-Text erkannt.");
       setStatus("Keine gültige gedruckte ISBN erkannt. Halte ISBN-Zeile und Barcode näher ins Bild oder nutze die manuelle Eingabe.", "error");
-      resumeScanner();
     }
   } finally {
     disposeCanvas(frame);
+    if (runId === recognitionRunId && !reviewInProgress && !lookupInProgress && recognitionRunning) finishRecognition();
   }
 }
 
@@ -1457,7 +1510,9 @@ async function applyCameraEnhancements() {
 
   els.torchButton.classList.toggle("hidden", capabilities.torch !== true);
   const width = settings.width ? `${settings.width}×${settings.height ?? "?"}` : "";
-  setStatus(`Kamera aktiv${width ? ` (${width})` : ""}. Automatische Prüfung alle zwei Sekunden.`, "success");
+  setStatus(`Kamera aktiv${width ? ` (${width})` : ""}. Erkennung kann manuell gestartet werden.`, "success");
+  setAutoScanState("Bereit – Erkennung manuell starten.");
+  updateRecognitionControls();
 }
 
 async function startScanner() {
@@ -1472,7 +1527,7 @@ async function startScanner() {
   if (scannerStarting) return scannerStarting;
 
   scannerStarting = (async () => {
-    pauseAutoScanner("Kamera wird vorbereitet …");
+    cancelRecognition("Kamera wird vorbereitet …");
     setStatus("Rückkamera und Autofokus werden vorbereitet …");
     const constraints = {
       audio: false,
@@ -1499,12 +1554,10 @@ async function startScanner() {
     els.cameraVideo.srcObject = mediaStream;
     await els.cameraVideo.play();
     scannerRunning = true;
-    autoScanPaused = false;
-    consecutiveBarcodeMisses = 0;
+    recognitionRunning = false;
     torchOn = false;
     els.torchButton.textContent = "Licht einschalten";
     await applyCameraEnhancements();
-    scheduleAutoScan(AUTO_SCAN_INTERVAL_MS);
   })();
 
   try {
@@ -1519,8 +1572,7 @@ async function startScanner() {
 }
 
 async function stopScanner() {
-  clearAutoScanTimer();
-  autoScanPaused = true;
+  cancelRecognition("Kamera gestoppt");
   for (const track of mediaStream?.getTracks?.() ?? []) track.stop();
   mediaStream = null;
   videoTrack = null;
@@ -1530,21 +1582,25 @@ async function stopScanner() {
     els.cameraVideo.srcObject = null;
   }
   scannerRunning = false;
-  autoScanCycleRunning = false;
-  consecutiveBarcodeMisses = 0;
+  recognitionRunning = false;
   torchOn = false;
-  setAutoScanState("Automatik gestoppt");
+  setAutoScanState("Kamera gestoppt");
+  updateRecognitionControls();
 }
 
 function resumeScanner() {
-  if (reviewInProgress || lookupInProgress) return;
+  if (reviewInProgress || lookupInProgress) {
+    updateRecognitionControls();
+    return;
+  }
   if (!scannerRunning) {
     startScanner();
     return;
   }
-  autoScanPaused = false;
-  setStatus("Bereit. Barcodeprüfung alle zwei Sekunden; nach zwei Fehlversuchen folgt OCR.", "success");
-  scheduleAutoScan(AUTO_SCAN_INTERVAL_MS);
+  recognitionRunning = false;
+  setAutoScanState("Bereit – Erkennung manuell starten.");
+  setStatus("Bereit. Richte das Buch aus und tippe auf „Erkennung starten“.", "success");
+  updateRecognitionControls();
 }
 
 function ensureScannerReady() {
@@ -1584,8 +1640,11 @@ async function applyZoom(value) {
 }
 
 async function scanPhoto(file) {
-  if (!file) return;
-  pauseAutoScanner("Foto wird ausgewertet.");
+  if (!file || recognitionRunning || reviewInProgress || lookupInProgress || ocrInProgress) return;
+  recognitionRunning = true;
+  const runId = ++recognitionRunId;
+  updateRecognitionControls();
+  setAutoScanState("Foto wird ausgewertet");
   els.photoInput.disabled = true;
   setStatus("Foto wird auf Barcode und gedruckte ISBN geprüft …");
   let sourceCanvas = null;
@@ -1621,11 +1680,12 @@ async function scanPhoto(file) {
     // Dadurch wird auch der ausgewählte File-Verweis sofort freigegeben.
     els.photoInput.value = "";
     els.photoInput.disabled = false;
-    if (!reviewInProgress) resumeScanner();
+    if (runId === recognitionRunId && !reviewInProgress && !lookupInProgress) finishRecognition();
   }
 }
 
 els.lookupButton.addEventListener("click", () => lookupBook(els.manualIsbn.value));
+els.recognitionButton.addEventListener("click", startRecognitionRun);
 els.cameraRestartButton.addEventListener("click", restartScanner);
 els.torchButton.addEventListener("click", toggleTorch);
 els.ocrButton.addEventListener("click", scanPrintedIsbnFromCamera);
@@ -1668,15 +1728,14 @@ for (const input of els.resultCard.querySelectorAll("input, select, textarea")) 
 }
 
 window.addEventListener("pagehide", () => {
-  clearAutoScanTimer();
+  if (recognitionRunning) cancelRecognition("Erkennung unterbrochen.");
 });
 
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
-    clearAutoScanTimer();
+    if (recognitionRunning) cancelRecognition("Erkennung unterbrochen.");
   } else if (scannerRunning && !reviewInProgress && !lookupInProgress) {
-    autoScanPaused = false;
-    scheduleAutoScan(AUTO_SCAN_INTERVAL_MS);
+    resumeScanner();
   }
 });
 
