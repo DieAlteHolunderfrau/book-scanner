@@ -4,6 +4,8 @@ const els = {
   googleApiKey: document.querySelector("#google-api-key"),
   manualIsbn: document.querySelector("#manual-isbn"),
   lookupButton: document.querySelector("#lookup-button"),
+  cameraVideo: document.querySelector("#camera-video"),
+  autoScanState: document.querySelector("#auto-scan-state"),
   cameraRestartButton: document.querySelector("#camera-restart-button"),
   torchButton: document.querySelector("#torch-button"),
   ocrButton: document.querySelector("#ocr-button"),
@@ -49,18 +51,30 @@ let reviewInProgress = false;
 let currentMetadataSource = "manual";
 let batch = [];
 let editingBatchId = null;
-let html5QrCode = null;
-let offlineQrCode = null;
+let mediaStream = null;
+let videoTrack = null;
+let imageCapture = null;
+let nativeBarcodeDetector = null;
+let nativeBarcodeDetectorPromise = null;
 let ocrWorker = null;
 let ocrInProgress = false;
 let scannerRunning = false;
-let scannerPaused = false;
 let scannerStarting = null;
+let autoScanPaused = false;
+let autoScanTimer = null;
+let autoScanCycleRunning = false;
+let consecutiveBarcodeMisses = 0;
 let torchOn = false;
 let zoomTimer = null;
 
-const BATCH_STORAGE_KEY = "bookScanner.batch.v6";
-const LEGACY_BATCH_STORAGE_KEYS = ["bookScanner.batch.v5", "bookScanner.batch.v4"];
+const AUTO_SCAN_INTERVAL_MS = 2000;
+const BARCODE_MISSES_BEFORE_OCR = 2;
+const BATCH_STORAGE_KEY = "bookScanner.batch.v7";
+const LEGACY_BATCH_STORAGE_KEYS = [
+  "bookScanner.batch.v6",
+  "bookScanner.batch.v5",
+  "bookScanner.batch.v4",
+];
 
 function setStatus(message, kind = "") {
   els.status.textContent = message;
@@ -119,9 +133,11 @@ function isBookIsbn(isbn) {
 
 function barcodeFormatName(decodedResult) {
   return String(
+    decodedResult?.format ??
     decodedResult?.result?.format?.formatName ??
     decodedResult?.result?.format?.toString?.() ??
     decodedResult?.decodedResult?.format ??
+    decodedResult?.codeResult?.format ??
     ""
   );
 }
@@ -681,7 +697,7 @@ function addCurrentBookToBatch() {
   renderBatch();
   resetFormForNextScan();
   setStatus(`${batch.length} Buch${batch.length === 1 ? "" : "er"} im Stapel. Bereit für den nächsten Scan.`, "success");
-  document.querySelector("#reader").scrollIntoView({ behavior: "smooth", block: "start" });
+  document.querySelector("#camera-video").scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 function editBatchBook(id) {
@@ -914,34 +930,11 @@ async function copyMarkdown() {
 }
 
 function scannerAvailable() {
-  return typeof Html5Qrcode !== "undefined";
+  return Boolean(navigator.mediaDevices?.getUserMedia);
 }
 
-function supportedBarcodeFormats() {
-  return [
-    Html5QrcodeSupportedFormats.EAN_13,
-    Html5QrcodeSupportedFormats.UPC_A,
-    Html5QrcodeSupportedFormats.UPC_E,
-    Html5QrcodeSupportedFormats.EAN_8,
-  ];
-}
-
-function createScannerIfNeeded() {
-  if (!scannerAvailable()) return;
-  if (!html5QrCode) {
-    html5QrCode = new Html5Qrcode("reader", {
-      formatsToSupport: supportedBarcodeFormats(),
-      useBarCodeDetectorIfSupported: true,
-      verbose: false,
-    });
-  }
-  if (!offlineQrCode) {
-    offlineQrCode = new Html5Qrcode("offline-reader", {
-      formatsToSupport: supportedBarcodeFormats(),
-      useBarCodeDetectorIfSupported: true,
-      verbose: false,
-    });
-  }
+function setAutoScanState(message) {
+  if (els.autoScanState) els.autoScanState.textContent = message;
 }
 
 function formatZoom(value) {
@@ -951,51 +944,22 @@ function formatZoom(value) {
   })}×`;
 }
 
-async function applyCameraEnhancements() {
-  if (!scannerRunning || !html5QrCode) return;
-
-  let capabilities = {};
-  let settings = {};
-  try {
-    capabilities = html5QrCode.getRunningTrackCapabilities() ?? {};
-    settings = html5QrCode.getRunningTrackSettings() ?? {};
-  } catch (error) {
-    console.warn("Kamerafähigkeiten nicht verfügbar:", error);
+function gtinCheckDigitValid(value) {
+  const digits = digitsOnly(value);
+  if (![8, 12, 13].includes(digits.length)) return false;
+  const body = digits.slice(0, -1);
+  let sum = 0;
+  for (let index = body.length - 1, position = 0; index >= 0; index -= 1, position += 1) {
+    sum += Number(body[index]) * (position % 2 === 0 ? 3 : 1);
   }
+  return Number(digits.at(-1)) === (10 - (sum % 10)) % 10;
+}
 
-  if (Array.isArray(capabilities.focusMode) && capabilities.focusMode.includes("continuous")) {
-    try {
-      await html5QrCode.applyVideoConstraints({
-        advanced: [{ focusMode: "continuous" }],
-      });
-    } catch (error) {
-      console.warn("Kontinuierlicher Autofokus konnte nicht gesetzt werden:", error);
-    }
-  }
-
-  if (capabilities.zoom && Number.isFinite(capabilities.zoom.min) && Number.isFinite(capabilities.zoom.max)) {
-    const min = Number(capabilities.zoom.min);
-    const max = Number(capabilities.zoom.max);
-    const step = Number(capabilities.zoom.step) || 0.1;
-    const current = Math.min(max, Math.max(min, Number(settings.zoom) || min));
-    els.zoomSlider.min = String(min);
-    els.zoomSlider.max = String(max);
-    els.zoomSlider.step = String(step);
-    els.zoomSlider.value = String(current);
-    els.zoomValue.textContent = formatZoom(current);
-    els.zoomPanel.classList.remove("hidden");
-  } else {
-    els.zoomPanel.classList.add("hidden");
-  }
-
-  if (capabilities.torch === true) {
-    els.torchButton.classList.remove("hidden");
-  } else {
-    els.torchButton.classList.add("hidden");
-  }
-
-  const width = settings.width ? `${settings.width}×${settings.height ?? "?"}` : "";
-  setStatus(`Kamera aktiv${width ? ` (${width})` : ""}. Barcode vollständig in den breiten Rahmen halten.`, "success");
+function validDecodedBarcode(value) {
+  const classification = classifyBarcode(value);
+  if (classification.type === "isbn") return true;
+  if (classification.type === "retail") return gtinCheckDigitValid(classification.barcode);
+  return false;
 }
 
 function loadScriptOnce(src, globalName) {
@@ -1061,9 +1025,22 @@ function extractIsbnFromText(text) {
   return "";
 }
 
+function disposeCanvas(canvas) {
+  if (!(canvas instanceof HTMLCanvasElement)) return;
+  try {
+    const context = canvas.getContext("2d");
+    context?.clearRect(0, 0, canvas.width, canvas.height);
+  } catch (_) {
+    // Das Zurücksetzen der Dimensionen gibt den Bildpuffer trotzdem frei.
+  }
+  canvas.width = 1;
+  canvas.height = 1;
+  canvas.remove?.();
+}
+
 function currentVideoFrame() {
-  const video = document.querySelector("#reader video");
-  if (!video || !video.videoWidth || !video.videoHeight) return null;
+  const video = els.cameraVideo;
+  if (!video || !video.videoWidth || !video.videoHeight || video.readyState < 2) return null;
   const canvas = document.createElement("canvas");
   canvas.width = video.videoWidth;
   canvas.height = video.videoHeight;
@@ -1074,20 +1051,50 @@ function currentVideoFrame() {
 async function imageSourceToCanvas(source) {
   if (source instanceof HTMLCanvasElement) return source;
   const bitmap = await createImageBitmap(source);
-  const canvas = document.createElement("canvas");
-  canvas.width = bitmap.width;
-  canvas.height = bitmap.height;
-  canvas.getContext("2d", { willReadFrequently: true }).drawImage(bitmap, 0, 0);
-  bitmap.close?.();
-  return canvas;
+  try {
+    const canvas = document.createElement("canvas");
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    canvas.getContext("2d", { willReadFrequently: true }).drawImage(bitmap, 0, 0);
+    return canvas;
+  } finally {
+    bitmap.close?.();
+  }
 }
 
-function makeCanvasVariant(source, spec = {}, contrast = false) {
-  const sx = Math.round((spec.x ?? 0) * source.width);
-  const sy = Math.round((spec.y ?? 0) * source.height);
-  const sw = Math.round((spec.w ?? 1) * source.width);
-  const sh = Math.round((spec.h ?? 1) * source.height);
-  const scale = Math.min(2.2, Math.max(1, 1500 / Math.max(sw, 1)));
+async function captureFrameCanvas({ preferPhoto = false } = {}) {
+  if (videoTrack && globalThis.ImageCapture) {
+    try {
+      if (!imageCapture) imageCapture = new ImageCapture(videoTrack);
+      if (preferPhoto && typeof imageCapture.takePhoto === "function") {
+        const photo = await imageCapture.takePhoto();
+        return await imageSourceToCanvas(photo);
+      }
+      if (typeof imageCapture.grabFrame === "function") {
+        const bitmap = await imageCapture.grabFrame();
+        try {
+          const canvas = document.createElement("canvas");
+          canvas.width = bitmap.width;
+          canvas.height = bitmap.height;
+          canvas.getContext("2d", { willReadFrequently: true }).drawImage(bitmap, 0, 0);
+          return canvas;
+        } finally {
+          bitmap.close?.();
+        }
+      }
+    } catch (error) {
+      console.warn("ImageCapture nicht nutzbar; verwende Videoframe:", error);
+    }
+  }
+  return currentVideoFrame();
+}
+
+function makeCanvasVariant(source, spec = {}, contrast = false, targetWidth = 1700) {
+  const sx = Math.max(0, Math.round((spec.x ?? 0) * source.width));
+  const sy = Math.max(0, Math.round((spec.y ?? 0) * source.height));
+  const sw = Math.max(1, Math.min(source.width - sx, Math.round((spec.w ?? 1) * source.width)));
+  const sh = Math.max(1, Math.min(source.height - sy, Math.round((spec.h ?? 1) * source.height)));
+  const scale = Math.min(2.4, Math.max(1, targetWidth / sw));
   const canvas = document.createElement("canvas");
   canvas.width = Math.max(1, Math.round(sw * scale));
   canvas.height = Math.max(1, Math.round(sh * scale));
@@ -1097,46 +1104,142 @@ function makeCanvasVariant(source, spec = {}, contrast = false) {
   if (contrast) {
     const image = ctx.getImageData(0, 0, canvas.width, canvas.height);
     const data = image.data;
-    for (let i = 0; i < data.length; i += 4) {
-      const gray = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-      const adjusted = Math.max(0, Math.min(255, (gray - 128) * 1.65 + 128));
-      data[i] = data[i + 1] = data[i + 2] = adjusted;
+    for (let index = 0; index < data.length; index += 4) {
+      const gray = 0.299 * data[index] + 0.587 * data[index + 1] + 0.114 * data[index + 2];
+      const adjusted = Math.max(0, Math.min(255, (gray - 128) * 1.7 + 128));
+      data[index] = data[index + 1] = data[index + 2] = adjusted;
     }
     ctx.putImageData(image, 0, 0);
   }
   return canvas;
 }
 
-function canvasToFile(canvas, name) {
+function canvasToBlob(canvas, type = "image/jpeg", quality = 0.92) {
   return new Promise((resolve, reject) => {
     canvas.toBlob((blob) => {
-      if (!blob) reject(new Error("Bildvariante konnte nicht erzeugt werden."));
-      else resolve(new File([blob], name, { type: "image/png" }));
-    }, "image/png");
+      if (blob) resolve(blob);
+      else reject(new Error("Temporäres Bild konnte nicht erzeugt werden."));
+    }, type, quality);
   });
 }
 
-async function scanCanvasVariants(sourceCanvas) {
-  createScannerIfNeeded();
+async function getNativeBarcodeDetector() {
+  if (nativeBarcodeDetectorPromise) return nativeBarcodeDetectorPromise;
+  nativeBarcodeDetectorPromise = (async () => {
+    if (!globalThis.BarcodeDetector) return null;
+    try {
+      const wanted = ["ean_13", "ean_8", "upc_a", "upc_e"];
+      const supported = typeof BarcodeDetector.getSupportedFormats === "function"
+        ? await BarcodeDetector.getSupportedFormats()
+        : wanted;
+      const formats = wanted.filter((format) => supported.includes(format));
+      if (!formats.length) return null;
+      nativeBarcodeDetector = new BarcodeDetector({ formats });
+      return nativeBarcodeDetector;
+    } catch (error) {
+      console.warn("Native BarcodeDetector-API nicht nutzbar:", error);
+      return null;
+    }
+  })();
+  return nativeBarcodeDetectorPromise;
+}
+
+async function detectBarcodeNative(canvas) {
+  const detector = await getNativeBarcodeDetector();
+  if (!detector) return null;
+  try {
+    const results = await detector.detect(canvas);
+    const match = results.find((result) => validDecodedBarcode(result.rawValue));
+    return match ? {
+      decodedText: match.rawValue,
+      decodedResult: { format: match.format || "BarcodeDetector" },
+    } : null;
+  } catch (error) {
+    console.warn("Native Barcode-Erkennung fehlgeschlagen:", error);
+    return null;
+  }
+}
+
+function decodeQuagga(url, { locate = true, size = 1700, patchSize = "small" } = {}) {
+  if (!globalThis.Quagga) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    Quagga.decodeSingle({
+      src: url,
+      numOfWorkers: 0,
+      locate,
+      inputStream: {
+        size,
+        singleChannel: false,
+      },
+      locator: {
+        halfSample: false,
+        patchSize,
+      },
+      decoder: {
+        readers: ["ean_reader", "upc_reader", "ean_8_reader", "upc_e_reader"],
+        multiple: false,
+      },
+    }, (result) => {
+      const value = result?.codeResult?.code ?? "";
+      if (!value || !validDecodedBarcode(value)) {
+        resolve(null);
+        return;
+      }
+      resolve({
+        decodedText: value,
+        decodedResult: {
+          format: result.codeResult.format || "Quagga2",
+          codeResult: result.codeResult,
+        },
+      });
+    });
+  });
+}
+
+async function detectBarcodeQuagga(canvas, options = {}) {
+  if (!globalThis.Quagga) return null;
+  let url = "";
+  try {
+    const blob = await canvasToBlob(canvas);
+    url = URL.createObjectURL(blob);
+    return await decodeQuagga(url, options);
+  } catch (error) {
+    console.warn("Quagga2-Bildprüfung fehlgeschlagen:", error);
+    return null;
+  } finally {
+    if (url) URL.revokeObjectURL(url);
+  }
+}
+
+async function scanBarcodeFromCanvas(sourceCanvas) {
+  const nativeResult = await detectBarcodeNative(sourceCanvas);
+  if (nativeResult) return nativeResult;
+
   const variants = [
-    [{ x: 0, y: 0, w: 1, h: 1 }, false],
-    [{ x: 0, y: 0.18, w: 1, h: 0.58 }, false],
-    [{ x: 0, y: 0, w: 1, h: 0.52 }, false],
-    [{ x: 0, y: 0.48, w: 1, h: 0.52 }, false],
-    [{ x: 0.03, y: 0.12, w: 0.94, h: 0.76 }, true],
-    [{ x: 0, y: 0.18, w: 1, h: 0.58 }, true],
+    {
+      spec: { x: 0.04, y: 0.28, w: 0.92, h: 0.44 },
+      contrast: false,
+      options: { locate: false, size: 1800, patchSize: "small" },
+    },
+    {
+      spec: { x: 0.04, y: 0.28, w: 0.92, h: 0.44 },
+      contrast: true,
+      options: { locate: false, size: 1800, patchSize: "small" },
+    },
+    {
+      spec: { x: 0, y: 0.12, w: 1, h: 0.76 },
+      contrast: false,
+      options: { locate: true, size: 1800, patchSize: "x-small" },
+    },
   ];
 
-  for (let index = 0; index < variants.length; index += 1) {
-    const [spec, contrast] = variants[index];
-    setStatus(`Barcode wird geprüft … Durchlauf ${index + 1}/${variants.length}`);
-    const canvas = makeCanvasVariant(sourceCanvas, spec, contrast);
-    const file = await canvasToFile(canvas, `scan-${index}.png`);
+  for (const variant of variants) {
+    const canvas = makeCanvasVariant(sourceCanvas, variant.spec, variant.contrast, 1800);
     try {
-      const result = await offlineQrCode.scanFileV2(file, false);
-      return { decodedText: result?.decodedText ?? result, decodedResult: result };
-    } catch (_) {
-      // Nächsten Ausschnitt versuchen.
+      const result = await detectBarcodeQuagga(canvas, variant.options);
+      if (result) return result;
+    } finally {
+      disposeCanvas(canvas);
     }
   }
   return null;
@@ -1147,52 +1250,57 @@ async function recognizeIsbnFromImage(source) {
   ocrInProgress = true;
   els.ocrButton.disabled = true;
   els.ocrButton.classList.add("busy");
+  let ownCanvas = false;
+  let canvas = null;
+  let ocrCanvas = null;
   try {
     setStatus("OCR wird geladen; beim ersten Mal kann das etwas dauern …");
     const worker = await getOcrWorker();
-    const canvas = source instanceof HTMLCanvasElement ? source : await imageSourceToCanvas(source);
-    const ocrCanvas = makeCanvasVariant(canvas, { x: 0, y: 0, w: 1, h: 1 }, true);
+    canvas = source instanceof HTMLCanvasElement ? source : await imageSourceToCanvas(source);
+    ownCanvas = canvas !== source;
+    ocrCanvas = makeCanvasVariant(canvas, { x: 0.02, y: 0.08, w: 0.96, h: 0.84 }, true, 1800);
     const result = await worker.recognize(ocrCanvas);
-    return extractIsbnFromText(result?.data?.text ?? "");
+    const isbn = extractIsbnFromText(result?.data?.text ?? "");
+    return isbn;
   } catch (error) {
     console.warn("OCR fehlgeschlagen:", error);
     setStatus(`ISBN-Texterkennung fehlgeschlagen: ${error.message || error}`, "error");
     return "";
   } finally {
+    disposeCanvas(ocrCanvas);
+    if (ownCanvas) disposeCanvas(canvas);
     ocrInProgress = false;
     els.ocrButton.disabled = false;
     els.ocrButton.classList.remove("busy");
   }
 }
 
+function clearAutoScanTimer() {
+  if (autoScanTimer) window.clearTimeout(autoScanTimer);
+  autoScanTimer = null;
+}
+
+function pauseAutoScanner(message = "Automatik pausiert.") {
+  autoScanPaused = true;
+  clearAutoScanTimer();
+  setAutoScanState(message);
+}
+
+function scheduleAutoScan(delay = AUTO_SCAN_INTERVAL_MS) {
+  clearAutoScanTimer();
+  if (!scannerRunning || autoScanPaused || reviewInProgress || lookupInProgress) return;
+  setAutoScanState(`Nächste Barcodeprüfung in ${Math.round(delay / 1000)} s`);
+  autoScanTimer = window.setTimeout(runAutoScanCycle, delay);
+}
+
 async function lookupRecognizedIsbn(isbn, sourceLabel = "Texterkennung") {
   if (!isBookIsbn(isbn)) return false;
+  pauseAutoScanner("Buch erkannt – Prüfung pausiert.");
   if (navigator.vibrate) navigator.vibrate([40, 35, 40]);
   els.manualIsbn.value = isbn;
   setStatus(`${sourceLabel}: ISBN ${isbn} erkannt. Metadaten werden geladen …`, "success");
   await lookupBook(isbn);
   return true;
-}
-
-async function scanPrintedIsbnFromCamera() {
-  if (ocrInProgress || lookupInProgress || reviewInProgress) return;
-  let frame = currentVideoFrame();
-  if (!frame) {
-    setStatus("Kein Kamerabild verfügbar. Nutze stattdessen „Foto scannen“.", "error");
-    return;
-  }
-  try {
-    if (scannerRunning && !scannerPaused) {
-      html5QrCode.pause(true);
-      scannerPaused = true;
-    }
-  } catch (_) {}
-  const isbn = await recognizeIsbnFromImage(frame);
-  if (isbn) await lookupRecognizedIsbn(isbn);
-  else {
-    setStatus("Keine gültige gedruckte ISBN erkannt. Halte ISBN-Zeile und Barcode näher ins Bild oder nutze die manuelle Eingabe.", "error");
-    resumeScanner();
-  }
 }
 
 async function handleDecodedBarcode(decodedText, decodedResult = null, sourceImage = null) {
@@ -1203,14 +1311,9 @@ async function handleDecodedBarcode(decodedText, decodedResult = null, sourceIma
   if (dedupeKey === lastScanned) return;
   lastScanned = dedupeKey;
   window.setTimeout(() => { lastScanned = ""; }, 3000);
+  pauseAutoScanner("Barcode erkannt – Prüfung pausiert.");
 
   if (classification.type === "isbn") {
-    try {
-      if (scannerRunning && !scannerPaused) {
-        html5QrCode.pause(true);
-        scannerPaused = true;
-      }
-    } catch (_) {}
     if (navigator.vibrate) navigator.vibrate(45);
     els.manualIsbn.value = classification.isbn;
     await lookupBook(classification.isbn);
@@ -1219,124 +1322,229 @@ async function handleDecodedBarcode(decodedText, decodedResult = null, sourceIma
   }
 
   if (classification.type === "retail") {
-    try {
-      if (scannerRunning && !scannerPaused) {
-        html5QrCode.pause(true);
-        scannerPaused = true;
-      }
-    } catch (_) {}
-    setStatus(`Handelsbarcode ${classification.barcode} erkannt, aber keine ISBN. Die aufgedruckte ISBN wird gelesen …`);
-    const image = sourceImage || currentVideoFrame();
-    const isbn = image ? await recognizeIsbnFromImage(image) : "";
+    setStatus(`Handelsbarcode ${classification.barcode} erkannt. Die aufgedruckte ISBN wird gelesen …`);
+    const isbn = sourceImage ? await recognizeIsbnFromImage(sourceImage) : "";
     if (isbn) {
+      disposeCanvas(sourceImage);
+      sourceImage = null;
       await lookupRecognizedIsbn(isbn, "ISBN-Text");
     } else {
-      setStatus(`Handelsbarcode ${classification.barcode} erkannt. Keine gedruckte ISBN gefunden; nutze „ISBN-Text lesen“, „Foto scannen“ oder die manuelle Eingabe.`, "error");
+      setStatus(`Handelsbarcode ${classification.barcode} erkannt, aber keine gedruckte ISBN gefunden. Nutze „ISBN-Text lesen“ oder die manuelle Eingabe.`, "error");
       resumeScanner();
     }
     return;
   }
 
   setStatus(`Barcode ${decodedText} erkannt, aber nicht als ISBN oder unterstützter Handelsbarcode eingeordnet.`, "error");
+  resumeScanner();
+}
+
+async function runAutoScanCycle() {
+  clearAutoScanTimer();
+  if (
+    !scannerRunning || autoScanPaused || reviewInProgress || lookupInProgress ||
+    ocrInProgress || autoScanCycleRunning
+  ) {
+    scheduleAutoScan();
+    return;
+  }
+
+  autoScanCycleRunning = true;
+  let frame = null;
+  try {
+    frame = await captureFrameCanvas();
+    if (!frame) {
+      setStatus("Noch kein stabiles Kamerabild verfügbar.");
+      return;
+    }
+
+    setAutoScanState(`Barcodeprüfung ${consecutiveBarcodeMisses + 1}/${BARCODE_MISSES_BEFORE_OCR}`);
+    setStatus("Automatische Barcodeprüfung läuft …");
+    const decoded = await scanBarcodeFromCanvas(frame);
+
+    if (decoded) {
+      consecutiveBarcodeMisses = 0;
+      const classification = classifyBarcode(decoded.decodedText, decoded.decodedResult);
+      if (classification.type === "isbn") {
+        // Für einen direkten ISBN-Treffer wird das Bild vor dem Netzwerkabruf freigegeben.
+        disposeCanvas(frame);
+        frame = null;
+      }
+      await handleDecodedBarcode(decoded.decodedText, decoded.decodedResult, frame);
+      return;
+    }
+
+    consecutiveBarcodeMisses += 1;
+    if (consecutiveBarcodeMisses < BARCODE_MISSES_BEFORE_OCR) {
+      setStatus("Kein Barcode erkannt (1/2). Nächster Versuch in zwei Sekunden.");
+      return;
+    }
+
+    consecutiveBarcodeMisses = 0;
+    setAutoScanState("Zweimal kein Barcode – OCR läuft");
+    setStatus("Zweimal kein Barcode erkannt. Die aufgedruckte ISBN wird jetzt gelesen …");
+    const isbn = await recognizeIsbnFromImage(frame);
+    if (isbn) {
+      // Das Bild ist nach der OCR nicht mehr nötig und wird vor dem Metadatenabruf freigegeben.
+      disposeCanvas(frame);
+      frame = null;
+      await lookupRecognizedIsbn(isbn, "Automatische OCR");
+      return;
+    }
+    setStatus("Noch kein Treffer. Die nächste Barcodeprüfung startet in zwei Sekunden.");
+  } catch (error) {
+    console.warn("Automatischer Scanzyklus fehlgeschlagen:", error);
+    setStatus(`Automatische Erkennung fehlgeschlagen: ${error.message || error}`, "error");
+  } finally {
+    disposeCanvas(frame);
+    frame = null;
+    autoScanCycleRunning = false;
+    if (!reviewInProgress && !lookupInProgress && !autoScanPaused) scheduleAutoScan();
+  }
+}
+
+async function scanPrintedIsbnFromCamera() {
+  if (ocrInProgress || lookupInProgress || reviewInProgress) return;
+  pauseAutoScanner("Manuelle ISBN-Texterkennung läuft.");
+  let frame = null;
+  try {
+    frame = await captureFrameCanvas({ preferPhoto: true });
+    if (!frame) {
+      setStatus("Kein Kamerabild verfügbar. Nutze stattdessen „Foto scannen“.", "error");
+      resumeScanner();
+      return;
+    }
+    const isbn = await recognizeIsbnFromImage(frame);
+    disposeCanvas(frame);
+    frame = null;
+    if (isbn) await lookupRecognizedIsbn(isbn);
+    else {
+      setStatus("Keine gültige gedruckte ISBN erkannt. Halte ISBN-Zeile und Barcode näher ins Bild oder nutze die manuelle Eingabe.", "error");
+      resumeScanner();
+    }
+  } finally {
+    disposeCanvas(frame);
+  }
+}
+
+async function applyCameraEnhancements() {
+  if (!videoTrack) return;
+  const capabilities = typeof videoTrack.getCapabilities === "function" ? videoTrack.getCapabilities() : {};
+  const settings = typeof videoTrack.getSettings === "function" ? videoTrack.getSettings() : {};
+
+  if (Array.isArray(capabilities.focusMode) && capabilities.focusMode.includes("continuous")) {
+    try {
+      await videoTrack.applyConstraints({ advanced: [{ focusMode: "continuous" }] });
+    } catch (error) {
+      console.warn("Kontinuierlicher Autofokus konnte nicht gesetzt werden:", error);
+    }
+  }
+
+  if (capabilities.zoom && Number.isFinite(capabilities.zoom.min) && Number.isFinite(capabilities.zoom.max)) {
+    const min = Number(capabilities.zoom.min);
+    const max = Number(capabilities.zoom.max);
+    const step = Number(capabilities.zoom.step) || 0.1;
+    const current = Math.min(max, Math.max(min, Number(settings.zoom) || min));
+    els.zoomSlider.min = String(min);
+    els.zoomSlider.max = String(max);
+    els.zoomSlider.step = String(step);
+    els.zoomSlider.value = String(current);
+    els.zoomValue.textContent = formatZoom(current);
+    els.zoomPanel.classList.remove("hidden");
+  } else {
+    els.zoomPanel.classList.add("hidden");
+  }
+
+  els.torchButton.classList.toggle("hidden", capabilities.torch !== true);
+  const width = settings.width ? `${settings.width}×${settings.height ?? "?"}` : "";
+  setStatus(`Kamera aktiv${width ? ` (${width})` : ""}. Automatische Prüfung alle zwei Sekunden.`, "success");
 }
 
 async function startScanner() {
   if (!scannerAvailable()) {
-    setStatus("Scanner-Bibliothek nicht geladen. Prüfe die Verbindung und lade neu.", "error");
+    setStatus("Dieser Browser stellt keinen Kamerazugriff bereit.", "error");
     return;
   }
-  if (scannerRunning) return;
+  if (scannerRunning) {
+    resumeScanner();
+    return;
+  }
   if (scannerStarting) return scannerStarting;
 
-  createScannerIfNeeded();
   scannerStarting = (async () => {
+    pauseAutoScanner("Kamera wird vorbereitet …");
     setStatus("Rückkamera und Autofokus werden vorbereitet …");
-    const enhancedConfig = {
-      fps: 15,
-      disableFlip: true,
-      qrbox: (viewWidth, viewHeight) => ({
-        width: Math.max(260, Math.floor(viewWidth * 0.92)),
-        height: Math.max(105, Math.min(Math.floor(viewHeight * 0.42), 220)),
-      }),
-      aspectRatio: 16 / 9,
-      videoConstraints: {
+    const constraints = {
+      audio: false,
+      video: {
         facingMode: { ideal: "environment" },
         width: { ideal: 1920 },
         height: { ideal: 1080 },
-        frameRate: { ideal: 30, max: 30 },
+        frameRate: { ideal: 24, max: 30 },
       },
     };
 
     try {
-      await html5QrCode.start(
-        { facingMode: "environment" },
-        enhancedConfig,
-        (decodedText, decodedResult) => { handleDecodedBarcode(decodedText, decodedResult); },
-        () => {}
-      );
+      mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
     } catch (enhancedError) {
       console.warn("Erweiterte Kameraeinstellungen fehlgeschlagen, versuche Standardmodus:", enhancedError);
-      try {
-        await html5QrCode.start(
-          { facingMode: "environment" },
-          {
-            fps: 12,
-            disableFlip: true,
-            qrbox: (viewWidth, viewHeight) => ({
-              width: Math.max(260, Math.floor(viewWidth * 0.92)),
-              height: Math.max(105, Math.min(Math.floor(viewHeight * 0.42), 220)),
-            }),
-          },
-          (decodedText, decodedResult) => { handleDecodedBarcode(decodedText, decodedResult); },
-          () => {}
-        );
-      } catch (fallbackError) {
-        console.error(fallbackError);
-        setStatus(`Kamera konnte nicht gestartet werden: ${fallbackError}`, "error");
-        return;
-      }
+      mediaStream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { facingMode: { ideal: "environment" } },
+      });
     }
 
+    videoTrack = mediaStream.getVideoTracks()[0] ?? null;
+    imageCapture = null;
+    els.cameraVideo.srcObject = mediaStream;
+    await els.cameraVideo.play();
     scannerRunning = true;
-    scannerPaused = false;
+    autoScanPaused = false;
+    consecutiveBarcodeMisses = 0;
     torchOn = false;
     els.torchButton.textContent = "Licht einschalten";
     await applyCameraEnhancements();
+    scheduleAutoScan(AUTO_SCAN_INTERVAL_MS);
   })();
 
   try {
     await scannerStarting;
+  } catch (error) {
+    console.error(error);
+    setStatus(`Kamera konnte nicht gestartet werden: ${error.message || error}`, "error");
+    await stopScanner();
   } finally {
     scannerStarting = null;
   }
 }
 
 async function stopScanner() {
-  if (!html5QrCode || !scannerRunning) return;
-  try {
-    await html5QrCode.stop();
-  } catch (error) {
-    console.warn("Scanner konnte nicht sauber gestoppt werden:", error);
-  } finally {
-    scannerRunning = false;
-    scannerPaused = false;
-    torchOn = false;
+  clearAutoScanTimer();
+  autoScanPaused = true;
+  for (const track of mediaStream?.getTracks?.() ?? []) track.stop();
+  mediaStream = null;
+  videoTrack = null;
+  imageCapture = null;
+  if (els.cameraVideo) {
+    els.cameraVideo.pause();
+    els.cameraVideo.srcObject = null;
   }
+  scannerRunning = false;
+  autoScanCycleRunning = false;
+  consecutiveBarcodeMisses = 0;
+  torchOn = false;
+  setAutoScanState("Automatik gestoppt");
 }
 
 function resumeScanner() {
   if (reviewInProgress || lookupInProgress) return;
-  if (scannerRunning && scannerPaused) {
-    try {
-      html5QrCode.resume();
-      scannerPaused = false;
-      setStatus("Bereit für den nächsten Scan.", "success");
-      return;
-    } catch (error) {
-      console.warn("Scanner konnte nicht fortgesetzt werden:", error);
-    }
+  if (!scannerRunning) {
+    startScanner();
+    return;
   }
-  if (!scannerRunning) startScanner();
+  autoScanPaused = false;
+  setStatus("Bereit. Barcodeprüfung alle zwei Sekunden; nach zwei Fehlversuchen folgt OCR.", "success");
+  scheduleAutoScan(AUTO_SCAN_INTERVAL_MS);
 }
 
 function ensureScannerReady() {
@@ -1347,21 +1555,15 @@ async function restartScanner() {
   els.cameraRestartButton.disabled = true;
   setStatus("Kamera wird neu gestartet und fokussiert …");
   await stopScanner();
-  try {
-    if (html5QrCode) html5QrCode.clear();
-  } catch (error) {
-    console.warn(error);
-  }
-  html5QrCode = null;
   await startScanner();
   els.cameraRestartButton.disabled = false;
 }
 
 async function toggleTorch() {
-  if (!scannerRunning || !html5QrCode) return;
+  if (!videoTrack) return;
   const next = !torchOn;
   try {
-    await html5QrCode.applyVideoConstraints({ advanced: [{ torch: next }] });
+    await videoTrack.applyConstraints({ advanced: [{ torch: next }] });
     torchOn = next;
     els.torchButton.textContent = torchOn ? "Licht ausschalten" : "Licht einschalten";
   } catch (error) {
@@ -1371,39 +1573,39 @@ async function toggleTorch() {
 }
 
 async function applyZoom(value) {
-  if (!scannerRunning || !html5QrCode) return;
+  if (!videoTrack) return;
   const zoom = Number(value);
   els.zoomValue.textContent = formatZoom(zoom);
   try {
-    await html5QrCode.applyVideoConstraints({ advanced: [{ zoom }] });
+    await videoTrack.applyConstraints({ advanced: [{ zoom }] });
   } catch (error) {
     console.warn("Zoom konnte nicht gesetzt werden:", error);
   }
 }
 
 async function scanPhoto(file) {
-  if (!file || !scannerAvailable()) return;
+  if (!file) return;
+  pauseAutoScanner("Foto wird ausgewertet.");
   els.photoInput.disabled = true;
-  setStatus("Foto wird in mehreren Ausschnitten ausgewertet …");
-
-  await stopScanner();
-  createScannerIfNeeded();
+  setStatus("Foto wird auf Barcode und gedruckte ISBN geprüft …");
+  let sourceCanvas = null;
 
   try {
-    const sourceCanvas = await imageSourceToCanvas(file);
-    const decoded = await scanCanvasVariants(sourceCanvas);
+    sourceCanvas = await imageSourceToCanvas(file);
+    const decoded = await scanBarcodeFromCanvas(sourceCanvas);
     if (decoded) {
       const classification = classifyBarcode(decoded.decodedText, decoded.decodedResult);
       if (classification.type === "isbn") {
-        await handleDecodedBarcode(decoded.decodedText, decoded.decodedResult, sourceCanvas);
-        return;
+        disposeCanvas(sourceCanvas);
+        sourceCanvas = null;
       }
-      if (classification.type === "retail") {
-        setStatus(`Handelsbarcode ${classification.barcode} erkannt. Suche gedruckte ISBN im Foto …`);
-      }
+      await handleDecodedBarcode(decoded.decodedText, decoded.decodedResult, sourceCanvas);
+      return;
     }
 
     const isbn = await recognizeIsbnFromImage(sourceCanvas);
+    disposeCanvas(sourceCanvas);
+    sourceCanvas = null;
     if (isbn) {
       await lookupRecognizedIsbn(isbn, "Foto-OCR");
       return;
@@ -1414,11 +1616,12 @@ async function scanPhoto(file) {
     console.warn(error);
     setStatus(`Foto konnte nicht ausgewertet werden: ${error.message || error}`, "error");
   } finally {
+    disposeCanvas(sourceCanvas);
+    sourceCanvas = null;
+    // Dadurch wird auch der ausgewählte File-Verweis sofort freigegeben.
     els.photoInput.value = "";
     els.photoInput.disabled = false;
-    if (!reviewInProgress) {
-      try { await startScanner(); } catch (_) {}
-    }
+    if (!reviewInProgress) resumeScanner();
   }
 }
 
@@ -1444,7 +1647,7 @@ els.resetExportButton.addEventListener("click", resetExportStatus);
 els.clearQueueButton.addEventListener("click", clearBatch);
 els.scrollScannerButton.addEventListener("click", () => {
   resetFormForNextScan();
-  document.querySelector("#reader").scrollIntoView({ behavior: "smooth", block: "start" });
+  document.querySelector("#camera-video").scrollIntoView({ behavior: "smooth", block: "start" });
 });
 els.queueList.addEventListener("click", (event) => {
   const button = event.target.closest("button[data-action]");
@@ -1463,6 +1666,19 @@ for (const input of els.resultCard.querySelectorAll("input, select, textarea")) 
   input.addEventListener("input", updatePreview);
   input.addEventListener("change", updatePreview);
 }
+
+window.addEventListener("pagehide", () => {
+  clearAutoScanTimer();
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    clearAutoScanTimer();
+  } else if (scannerRunning && !reviewInProgress && !lookupInProgress) {
+    autoScanPaused = false;
+    scheduleAutoScan(AUTO_SCAN_INTERVAL_MS);
+  }
+});
 
 loadSettings();
 loadBatch();

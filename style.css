@@ -318,3 +318,28 @@ button.danger {
 #ocr-button.busy {
   cursor: wait;
 }
+
+
+/* Scanner v7: eigenes Kameravideo, 2-Sekunden-Snapshots und OCR nach zwei Fehlversuchen. */
+#camera-video {
+  display: block;
+  width: 100%;
+  min-height: 245px;
+  max-height: 64vh;
+  object-fit: cover;
+  border-radius: 14px;
+  background: #171614;
+}
+
+.auto-scan-state {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  margin: 10px 0 0;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(36,33,29,.08);
+  color: #625c54;
+  font-size: .76rem;
+  font-weight: 750;
+}
