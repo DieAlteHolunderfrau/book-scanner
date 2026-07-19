@@ -1,4 +1,4 @@
-const CACHE_NAME = "book-scanner-v5";
+const CACHE_NAME = "book-scanner-v6";
 const LOCAL_ASSETS = [
   "./",
   "./index.html",

@@ -182,7 +182,7 @@ button.danger {
 }
 
 
-/* Scanner v5: full-frame decoding with a visual guide only. */
+/* Scanner v6: wide live scan region plus photo multi-pass and OCR fallback. */
 .scanner-shell {
   position: relative;
   min-height: 245px;
@@ -236,7 +236,7 @@ button.danger {
 
 .scanner-toolbar {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 9px;
   margin-top: 12px;
 }
@@ -302,4 +302,19 @@ button.danger {
   .scanner-toolbar .file-button {
     grid-column: 1 / -1;
   }
+}
+
+.offscreen-reader {
+  position: fixed;
+  left: -10000px;
+  top: 0;
+  width: 720px;
+  height: 480px;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
+#ocr-button.busy {
+  cursor: wait;
 }

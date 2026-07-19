@@ -6,6 +6,7 @@ const els = {
   lookupButton: document.querySelector("#lookup-button"),
   cameraRestartButton: document.querySelector("#camera-restart-button"),
   torchButton: document.querySelector("#torch-button"),
+  ocrButton: document.querySelector("#ocr-button"),
   photoInput: document.querySelector("#photo-input"),
   zoomPanel: document.querySelector("#zoom-panel"),
   zoomSlider: document.querySelector("#zoom-slider"),
@@ -49,14 +50,17 @@ let currentMetadataSource = "manual";
 let batch = [];
 let editingBatchId = null;
 let html5QrCode = null;
+let offlineQrCode = null;
+let ocrWorker = null;
+let ocrInProgress = false;
 let scannerRunning = false;
 let scannerPaused = false;
 let scannerStarting = null;
 let torchOn = false;
 let zoomTimer = null;
 
-const BATCH_STORAGE_KEY = "bookScanner.batch.v5";
-const LEGACY_BATCH_STORAGE_KEYS = ["bookScanner.batch.v4"];
+const BATCH_STORAGE_KEY = "bookScanner.batch.v6";
+const LEGACY_BATCH_STORAGE_KEYS = ["bookScanner.batch.v5", "bookScanner.batch.v4"];
 
 function setStatus(message, kind = "") {
   els.status.textContent = message;
@@ -67,16 +71,39 @@ function digitsOnly(value) {
   return String(value ?? "").replace(/\D/g, "");
 }
 
+function isbn10CheckDigitValid(isbn10) {
+  const compact = String(isbn10 ?? "").toUpperCase();
+  if (!/^\d{9}[\dX]$/.test(compact)) return false;
+  const sum = [...compact].reduce((total, char, index) => {
+    const value = char === "X" ? 10 : Number(char);
+    return total + value * (10 - index);
+  }, 0);
+  return sum % 11 === 0;
+}
+
+function isbn13CheckDigitValid(isbn13) {
+  const digits = String(isbn13 ?? "");
+  if (!/^\d{13}$/.test(digits)) return false;
+  const sum = [...digits.slice(0, 12)].reduce(
+    (total, digit, index) => total + Number(digit) * (index % 2 === 0 ? 1 : 3),
+    0
+  );
+  return Number(digits[12]) === (10 - (sum % 10)) % 10;
+}
+
 function normalizeIsbn(value) {
   const raw = String(value ?? "").trim();
-  const compact = raw.replace(/[\s-]/g, "");
-  if (/^\d{9}[\dXx]$/.test(compact)) return isbn10To13(compact);
+  const compact = raw.replace(/[\s-]/g, "").toUpperCase();
+  if (/^\d{9}[\dX]$/.test(compact)) {
+    return isbn10CheckDigitValid(compact) ? isbn10To13(compact) : compact;
+  }
   return digitsOnly(compact);
 }
 
 function isbn10To13(isbn10) {
-  if (!/^\d{9}[\dXx]$/.test(isbn10)) return isbn10;
-  const body = `978${isbn10.slice(0, 9)}`;
+  const compact = String(isbn10 ?? "").toUpperCase();
+  if (!isbn10CheckDigitValid(compact)) return compact;
+  const body = `978${compact.slice(0, 9)}`;
   const sum = [...body].reduce(
     (total, digit, index) => total + Number(digit) * (index % 2 === 0 ? 1 : 3),
     0
@@ -85,7 +112,34 @@ function isbn10To13(isbn10) {
 }
 
 function isBookIsbn(isbn) {
-  return /^\d{13}$/.test(isbn) && (isbn.startsWith("978") || isbn.startsWith("979"));
+  return /^\d{13}$/.test(isbn) &&
+    (isbn.startsWith("978") || isbn.startsWith("979")) &&
+    isbn13CheckDigitValid(isbn);
+}
+
+function barcodeFormatName(decodedResult) {
+  return String(
+    decodedResult?.result?.format?.formatName ??
+    decodedResult?.result?.format?.toString?.() ??
+    decodedResult?.decodedResult?.format ??
+    ""
+  );
+}
+
+function classifyBarcode(value, decodedResult = null) {
+  const raw = String(value ?? "").trim();
+  const digits = digitsOnly(raw);
+  const format = barcodeFormatName(decodedResult);
+  const normalized = normalizeIsbn(raw);
+
+  if (isBookIsbn(normalized)) return { type: "isbn", isbn: normalized, format };
+  if (digits.length === 13 && digits.startsWith("0")) {
+    return { type: "retail", barcode: digits.slice(1), format: format || "UPC-A" };
+  }
+  if ([8, 12, 13].includes(digits.length)) {
+    return { type: "retail", barcode: digits, format };
+  }
+  return { type: "unknown", barcode: raw, format };
 }
 
 function splitList(value) {
@@ -863,13 +917,31 @@ function scannerAvailable() {
   return typeof Html5Qrcode !== "undefined";
 }
 
+function supportedBarcodeFormats() {
+  return [
+    Html5QrcodeSupportedFormats.EAN_13,
+    Html5QrcodeSupportedFormats.UPC_A,
+    Html5QrcodeSupportedFormats.UPC_E,
+    Html5QrcodeSupportedFormats.EAN_8,
+  ];
+}
+
 function createScannerIfNeeded() {
-  if (html5QrCode || !scannerAvailable()) return;
-  html5QrCode = new Html5Qrcode("reader", {
-    formatsToSupport: [Html5QrcodeSupportedFormats.EAN_13],
-    useBarCodeDetectorIfSupported: true,
-    verbose: false,
-  });
+  if (!scannerAvailable()) return;
+  if (!html5QrCode) {
+    html5QrCode = new Html5Qrcode("reader", {
+      formatsToSupport: supportedBarcodeFormats(),
+      useBarCodeDetectorIfSupported: true,
+      verbose: false,
+    });
+  }
+  if (!offlineQrCode) {
+    offlineQrCode = new Html5Qrcode("offline-reader", {
+      formatsToSupport: supportedBarcodeFormats(),
+      useBarCodeDetectorIfSupported: true,
+      verbose: false,
+    });
+  }
 }
 
 function formatZoom(value) {
@@ -923,36 +995,249 @@ async function applyCameraEnhancements() {
   }
 
   const width = settings.width ? `${settings.width}×${settings.height ?? "?"}` : "";
-  setStatus(`Kamera aktiv${width ? ` (${width})` : ""}. Der ganze Bildausschnitt wird ausgewertet.`, "success");
+  setStatus(`Kamera aktiv${width ? ` (${width})` : ""}. Barcode vollständig in den breiten Rahmen halten.`, "success");
 }
 
-async function handleDecodedBarcode(decodedText) {
-  if (reviewInProgress || lookupInProgress) return;
+function loadScriptOnce(src, globalName) {
+  if (globalThis[globalName]) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const existing = document.querySelector(`script[data-loader="${globalName}"]`);
+    if (existing) {
+      existing.addEventListener("load", resolve, { once: true });
+      existing.addEventListener("error", reject, { once: true });
+      return;
+    }
+    const script = document.createElement("script");
+    script.src = src;
+    script.async = true;
+    script.dataset.loader = globalName;
+    script.onload = resolve;
+    script.onerror = () => reject(new Error(`${globalName} konnte nicht geladen werden.`));
+    document.head.appendChild(script);
+  });
+}
 
-  const isbn = normalizeIsbn(decodedText);
-  if (isbn === lastScanned) return;
-  lastScanned = isbn;
-  window.setTimeout(() => { lastScanned = ""; }, 2500);
+async function getOcrWorker() {
+  if (ocrWorker) return ocrWorker;
+  await loadScriptOnce("https://cdn.jsdelivr.net/npm/tesseract.js@7/dist/tesseract.min.js", "Tesseract");
+  ocrWorker = await Tesseract.createWorker("eng", undefined, {
+    logger: (message) => {
+      if (!ocrInProgress || message.status !== "recognizing text") return;
+      const percent = Math.round((message.progress || 0) * 100);
+      setStatus(`Gedruckte ISBN wird gelesen … ${percent}%`);
+    },
+  });
+  await ocrWorker.setParameters({
+    tessedit_char_whitelist: "ISBNisbn0123456789Xx-: ",
+    preserve_interword_spaces: "1",
+    tessedit_pageseg_mode: "6",
+  });
+  return ocrWorker;
+}
 
-  if (!isBookIsbn(isbn)) {
-    setStatus(`Barcode ${decodedText} erkannt, aber nicht als ISBN-13 eingeordnet.`, "error");
-    return;
+function normalizeOcrCandidate(value) {
+  return String(value ?? "")
+    .toUpperCase()
+    .replace(/[—–−]/g, "-")
+    .replace(/O/g, "0")
+    .replace(/[IL|]/g, "1")
+    .replace(/[^0-9X]/g, "");
+}
+
+function extractIsbnFromText(text) {
+  const cleaned = String(text ?? "").replace(/[—–−]/g, "-");
+  const candidates = [];
+  const isbnRegex = /ISBN(?:-1[03])?\s*[:#]?\s*([0-9OILXx|][0-9OILXx|\s-]{8,28})/gi;
+  for (const match of cleaned.matchAll(isbnRegex)) candidates.push(match[1]);
+  for (const match of cleaned.matchAll(/(?:^|\D)([0-9OILXx|][0-9OILXx|\s-]{8,22}[0-9Xx])(?:\D|$)/g)) {
+    candidates.push(match[1]);
   }
 
+  for (const candidate of candidates) {
+    const compact = normalizeOcrCandidate(candidate);
+    if (/^\d{9}[\dX]$/.test(compact) && isbn10CheckDigitValid(compact)) return isbn10To13(compact);
+    if (/^\d{13}$/.test(compact) && isBookIsbn(compact)) return compact;
+  }
+  return "";
+}
+
+function currentVideoFrame() {
+  const video = document.querySelector("#reader video");
+  if (!video || !video.videoWidth || !video.videoHeight) return null;
+  const canvas = document.createElement("canvas");
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  canvas.getContext("2d", { willReadFrequently: true }).drawImage(video, 0, 0);
+  return canvas;
+}
+
+async function imageSourceToCanvas(source) {
+  if (source instanceof HTMLCanvasElement) return source;
+  const bitmap = await createImageBitmap(source);
+  const canvas = document.createElement("canvas");
+  canvas.width = bitmap.width;
+  canvas.height = bitmap.height;
+  canvas.getContext("2d", { willReadFrequently: true }).drawImage(bitmap, 0, 0);
+  bitmap.close?.();
+  return canvas;
+}
+
+function makeCanvasVariant(source, spec = {}, contrast = false) {
+  const sx = Math.round((spec.x ?? 0) * source.width);
+  const sy = Math.round((spec.y ?? 0) * source.height);
+  const sw = Math.round((spec.w ?? 1) * source.width);
+  const sh = Math.round((spec.h ?? 1) * source.height);
+  const scale = Math.min(2.2, Math.max(1, 1500 / Math.max(sw, 1)));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(sw * scale));
+  canvas.height = Math.max(1, Math.round(sh * scale));
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(source, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+  if (contrast) {
+    const image = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const data = image.data;
+    for (let i = 0; i < data.length; i += 4) {
+      const gray = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+      const adjusted = Math.max(0, Math.min(255, (gray - 128) * 1.65 + 128));
+      data[i] = data[i + 1] = data[i + 2] = adjusted;
+    }
+    ctx.putImageData(image, 0, 0);
+  }
+  return canvas;
+}
+
+function canvasToFile(canvas, name) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (!blob) reject(new Error("Bildvariante konnte nicht erzeugt werden."));
+      else resolve(new File([blob], name, { type: "image/png" }));
+    }, "image/png");
+  });
+}
+
+async function scanCanvasVariants(sourceCanvas) {
+  createScannerIfNeeded();
+  const variants = [
+    [{ x: 0, y: 0, w: 1, h: 1 }, false],
+    [{ x: 0, y: 0.18, w: 1, h: 0.58 }, false],
+    [{ x: 0, y: 0, w: 1, h: 0.52 }, false],
+    [{ x: 0, y: 0.48, w: 1, h: 0.52 }, false],
+    [{ x: 0.03, y: 0.12, w: 0.94, h: 0.76 }, true],
+    [{ x: 0, y: 0.18, w: 1, h: 0.58 }, true],
+  ];
+
+  for (let index = 0; index < variants.length; index += 1) {
+    const [spec, contrast] = variants[index];
+    setStatus(`Barcode wird geprüft … Durchlauf ${index + 1}/${variants.length}`);
+    const canvas = makeCanvasVariant(sourceCanvas, spec, contrast);
+    const file = await canvasToFile(canvas, `scan-${index}.png`);
+    try {
+      const result = await offlineQrCode.scanFileV2(file, false);
+      return { decodedText: result?.decodedText ?? result, decodedResult: result };
+    } catch (_) {
+      // Nächsten Ausschnitt versuchen.
+    }
+  }
+  return null;
+}
+
+async function recognizeIsbnFromImage(source) {
+  if (!source || ocrInProgress) return "";
+  ocrInProgress = true;
+  els.ocrButton.disabled = true;
+  els.ocrButton.classList.add("busy");
+  try {
+    setStatus("OCR wird geladen; beim ersten Mal kann das etwas dauern …");
+    const worker = await getOcrWorker();
+    const canvas = source instanceof HTMLCanvasElement ? source : await imageSourceToCanvas(source);
+    const ocrCanvas = makeCanvasVariant(canvas, { x: 0, y: 0, w: 1, h: 1 }, true);
+    const result = await worker.recognize(ocrCanvas);
+    return extractIsbnFromText(result?.data?.text ?? "");
+  } catch (error) {
+    console.warn("OCR fehlgeschlagen:", error);
+    setStatus(`ISBN-Texterkennung fehlgeschlagen: ${error.message || error}`, "error");
+    return "";
+  } finally {
+    ocrInProgress = false;
+    els.ocrButton.disabled = false;
+    els.ocrButton.classList.remove("busy");
+  }
+}
+
+async function lookupRecognizedIsbn(isbn, sourceLabel = "Texterkennung") {
+  if (!isBookIsbn(isbn)) return false;
+  if (navigator.vibrate) navigator.vibrate([40, 35, 40]);
+  els.manualIsbn.value = isbn;
+  setStatus(`${sourceLabel}: ISBN ${isbn} erkannt. Metadaten werden geladen …`, "success");
+  await lookupBook(isbn);
+  return true;
+}
+
+async function scanPrintedIsbnFromCamera() {
+  if (ocrInProgress || lookupInProgress || reviewInProgress) return;
+  let frame = currentVideoFrame();
+  if (!frame) {
+    setStatus("Kein Kamerabild verfügbar. Nutze stattdessen „Foto scannen“.", "error");
+    return;
+  }
   try {
     if (scannerRunning && !scannerPaused) {
       html5QrCode.pause(true);
       scannerPaused = true;
     }
-  } catch (error) {
-    console.warn("Scanner konnte nicht pausiert werden:", error);
+  } catch (_) {}
+  const isbn = await recognizeIsbnFromImage(frame);
+  if (isbn) await lookupRecognizedIsbn(isbn);
+  else {
+    setStatus("Keine gültige gedruckte ISBN erkannt. Halte ISBN-Zeile und Barcode näher ins Bild oder nutze die manuelle Eingabe.", "error");
+    resumeScanner();
+  }
+}
+
+async function handleDecodedBarcode(decodedText, decodedResult = null, sourceImage = null) {
+  if (reviewInProgress || lookupInProgress || ocrInProgress) return;
+
+  const classification = classifyBarcode(decodedText, decodedResult);
+  const dedupeKey = `${classification.type}:${classification.isbn || classification.barcode}`;
+  if (dedupeKey === lastScanned) return;
+  lastScanned = dedupeKey;
+  window.setTimeout(() => { lastScanned = ""; }, 3000);
+
+  if (classification.type === "isbn") {
+    try {
+      if (scannerRunning && !scannerPaused) {
+        html5QrCode.pause(true);
+        scannerPaused = true;
+      }
+    } catch (_) {}
+    if (navigator.vibrate) navigator.vibrate(45);
+    els.manualIsbn.value = classification.isbn;
+    await lookupBook(classification.isbn);
+    if (!reviewInProgress) resumeScanner();
+    return;
   }
 
-  if (navigator.vibrate) navigator.vibrate(45);
-  els.manualIsbn.value = isbn;
-  await lookupBook(isbn);
+  if (classification.type === "retail") {
+    try {
+      if (scannerRunning && !scannerPaused) {
+        html5QrCode.pause(true);
+        scannerPaused = true;
+      }
+    } catch (_) {}
+    setStatus(`Handelsbarcode ${classification.barcode} erkannt, aber keine ISBN. Die aufgedruckte ISBN wird gelesen …`);
+    const image = sourceImage || currentVideoFrame();
+    const isbn = image ? await recognizeIsbnFromImage(image) : "";
+    if (isbn) {
+      await lookupRecognizedIsbn(isbn, "ISBN-Text");
+    } else {
+      setStatus(`Handelsbarcode ${classification.barcode} erkannt. Keine gedruckte ISBN gefunden; nutze „ISBN-Text lesen“, „Foto scannen“ oder die manuelle Eingabe.`, "error");
+      resumeScanner();
+    }
+    return;
+  }
 
-  if (!reviewInProgress) resumeScanner();
+  setStatus(`Barcode ${decodedText} erkannt, aber nicht als ISBN oder unterstützter Handelsbarcode eingeordnet.`, "error");
 }
 
 async function startScanner() {
@@ -969,7 +1254,11 @@ async function startScanner() {
     const enhancedConfig = {
       fps: 15,
       disableFlip: true,
-      // Absichtlich kein qrbox: Der Decoder untersucht das gesamte Videobild.
+      qrbox: (viewWidth, viewHeight) => ({
+        width: Math.max(260, Math.floor(viewWidth * 0.92)),
+        height: Math.max(105, Math.min(Math.floor(viewHeight * 0.42), 220)),
+      }),
+      aspectRatio: 16 / 9,
       videoConstraints: {
         facingMode: { ideal: "environment" },
         width: { ideal: 1920 },
@@ -982,7 +1271,7 @@ async function startScanner() {
       await html5QrCode.start(
         { facingMode: "environment" },
         enhancedConfig,
-        (decodedText) => { handleDecodedBarcode(decodedText); },
+        (decodedText, decodedResult) => { handleDecodedBarcode(decodedText, decodedResult); },
         () => {}
       );
     } catch (enhancedError) {
@@ -990,8 +1279,15 @@ async function startScanner() {
       try {
         await html5QrCode.start(
           { facingMode: "environment" },
-          { fps: 12, disableFlip: true },
-          (decodedText) => { handleDecodedBarcode(decodedText); },
+          {
+            fps: 12,
+            disableFlip: true,
+            qrbox: (viewWidth, viewHeight) => ({
+              width: Math.max(260, Math.floor(viewWidth * 0.92)),
+              height: Math.max(105, Math.min(Math.floor(viewHeight * 0.42), 220)),
+            }),
+          },
+          (decodedText, decodedResult) => { handleDecodedBarcode(decodedText, decodedResult); },
           () => {}
         );
       } catch (fallbackError) {
@@ -1088,34 +1384,48 @@ async function applyZoom(value) {
 async function scanPhoto(file) {
   if (!file || !scannerAvailable()) return;
   els.photoInput.disabled = true;
-  setStatus("Foto wird in voller Auflösung ausgewertet …");
+  setStatus("Foto wird in mehreren Ausschnitten ausgewertet …");
 
   await stopScanner();
   createScannerIfNeeded();
 
   try {
-    const result = await html5QrCode.scanFileV2(file, false);
-    const decodedText = result?.decodedText ?? result;
-    await handleDecodedBarcode(decodedText);
-    if (!reviewInProgress) {
-      setStatus("Auf dem Foto wurde kein nutzbarer ISBN-Barcode erkannt.", "error");
-      await startScanner();
+    const sourceCanvas = await imageSourceToCanvas(file);
+    const decoded = await scanCanvasVariants(sourceCanvas);
+    if (decoded) {
+      const classification = classifyBarcode(decoded.decodedText, decoded.decodedResult);
+      if (classification.type === "isbn") {
+        await handleDecodedBarcode(decoded.decodedText, decoded.decodedResult, sourceCanvas);
+        return;
+      }
+      if (classification.type === "retail") {
+        setStatus(`Handelsbarcode ${classification.barcode} erkannt. Suche gedruckte ISBN im Foto …`);
+      }
     }
+
+    const isbn = await recognizeIsbnFromImage(sourceCanvas);
+    if (isbn) {
+      await lookupRecognizedIsbn(isbn, "Foto-OCR");
+      return;
+    }
+
+    setStatus("Weder ISBN-Barcode noch gültige gedruckte ISBN erkannt. Fotografiere Barcode und ISBN-Zeile möglichst nah, frontal und scharf.", "error");
   } catch (error) {
     console.warn(error);
-    setStatus("Auf dem Foto wurde kein Barcode erkannt. Fotografiere ihn möglichst frontal und vollständig.", "error");
-    try { html5QrCode.clear(); } catch (_) {}
-    html5QrCode = null;
-    await startScanner();
+    setStatus(`Foto konnte nicht ausgewertet werden: ${error.message || error}`, "error");
   } finally {
     els.photoInput.value = "";
     els.photoInput.disabled = false;
+    if (!reviewInProgress) {
+      try { await startScanner(); } catch (_) {}
+    }
   }
 }
 
 els.lookupButton.addEventListener("click", () => lookupBook(els.manualIsbn.value));
 els.cameraRestartButton.addEventListener("click", restartScanner);
 els.torchButton.addEventListener("click", toggleTorch);
+els.ocrButton.addEventListener("click", scanPrintedIsbnFromCamera);
 els.photoInput.addEventListener("change", () => scanPhoto(els.photoInput.files?.[0]));
 els.zoomSlider.addEventListener("input", () => {
   els.zoomValue.textContent = formatZoom(els.zoomSlider.value);

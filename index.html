@@ -51,6 +51,7 @@
       <div class="scanner-toolbar">
         <button id="camera-restart-button" type="button">Kamera neu fokussieren</button>
         <button id="torch-button" type="button" class="hidden">Licht einschalten</button>
+        <button id="ocr-button" type="button">ISBN-Text lesen</button>
         <label class="file-button">
           Foto scannen
           <input id="photo-input" type="file" accept="image/*" capture="environment">
@@ -62,7 +63,7 @@
         <input id="zoom-slider" type="range" min="1" max="1" step="0.1" value="1">
       </div>
 
-      <p class="hint scanner-hint">Der sichtbare Rahmen ist nur eine Orientierung; ausgewertet wird das gesamte Bild. Bei schlechtem Live-Fokus hilft „Foto scannen“.</p>
+      <p class="hint scanner-hint">Der breite Rahmen ist der bevorzugte Live-Scanbereich. Foto-Scans werden zusätzlich in mehreren Ausschnitten geprüft; „ISBN-Text lesen“ erkennt aufgedruckte ISBN-10 bei älteren US-Barcodes.</p>
 
       <div class="manual">
         <label>ISBN manuell
@@ -153,6 +154,7 @@
       <p class="hint">Mobile Browser dürfen nicht automatisch viele Obsidian-Links hintereinander öffnen. Der Einzel-Export arbeitet deshalb die Warteschlange schrittweise ab. Das ZIP enthält alle Notizen auf einmal.</p>
     </section>
   </main>
+  <div id="offline-reader" class="offscreen-reader" aria-hidden="true"></div>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js"
           crossorigin="anonymous" referrerpolicy="no-referrer"></script>
