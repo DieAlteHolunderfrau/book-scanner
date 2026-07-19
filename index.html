@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f4efe4">
+  <meta name="description" content="ISBN-Scanner, der Buchnotizen in Obsidian anlegt.">
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="icon" href="./icons/icon-192.png">
+  <link rel="apple-touch-icon" href="./icons/icon-192.png">
+  <link rel="stylesheet" href="./style.css">
+  <title>Buchscanner</title>
+</head>
+<body>
+  <main>
+    <header>
+      <p class="eyebrow">OBSIDIAN-BEGLEITER</p>
+      <h1>Buchscanner</h1>
+      <p>ISBN scannen, Metadaten prüfen und als Markdown-Notiz in Obsidian anlegen.</p>
+    </header>
+
+    <section class="card">
+      <h2>1. Obsidian-Ziel</h2>
+      <div class="grid two">
+        <label>Vault-Name
+          <input id="vault" autocomplete="off" placeholder="Meine Bibliothek">
+        </label>
+        <label>Ordner im Vault
+          <input id="folder" autocomplete="off" value="Bücher">
+        </label>
+      </div>
+      <p class="hint">Der Vault muss auf dem Telefon bereits in Obsidian eingerichtet sein.</p>
+    </section>
+
+    <section class="card">
+      <h2>2. ISBN erfassen</h2>
+      <div id="reader"></div>
+      <div class="manual">
+        <label>ISBN manuell
+          <input id="manual-isbn" inputmode="numeric" autocomplete="off"
+                 placeholder="978… oder 10-stellige ISBN">
+        </label>
+        <button id="lookup-button" type="button">Buch suchen</button>
+      </div>
+      <p id="status" class="status" aria-live="polite">Bereit zum Scannen.</p>
+    </section>
+
+    <section id="result-card" class="card hidden">
+      <h2>3. Buch prüfen</h2>
+
+      <div class="book-preview">
+        <img id="cover-preview" alt="" hidden>
+        <div>
+          <label>Titel
+            <input id="title">
+          </label>
+          <label>Autorinnen und Autoren
+            <input id="authors" placeholder="Mehrere Namen mit ; trennen">
+          </label>
+        </div>
+      </div>
+
+      <div class="grid two">
+        <label>ISBN<input id="isbn" readonly></label>
+        <label>Verlag<input id="publisher"></label>
+        <label>Erscheinungsdatum<input id="published-date"></label>
+        <label>Seiten<input id="pages" inputmode="numeric"></label>
+        <label>Sprache<input id="language"></label>
+        <label>Cover-URL<input id="cover-url"></label>
+        <label>Besitz
+          <select id="ownership">
+            <option value="owned">im Besitz</option>
+            <option value="borrowed">geliehen</option>
+            <option value="wishlist">Wunschliste</option>
+          </select>
+        </label>
+        <label>Lesestatus
+          <select id="reading-status">
+            <option value="unread">ungelesen</option>
+            <option value="reading">wird gelesen</option>
+            <option value="read">gelesen</option>
+            <option value="abandoned">abgebrochen</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="actions">
+        <button id="obsidian-button" type="button" class="primary">In Obsidian anlegen</button>
+        <button id="copy-button" type="button">Markdown kopieren</button>
+      </div>
+
+      <details>
+        <summary>Markdown-Vorschau</summary>
+        <pre id="markdown-preview"></pre>
+      </details>
+    </section>
+  </main>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js"
+          crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+  <script src="./app.js"></script>
+</body>
+</html>
