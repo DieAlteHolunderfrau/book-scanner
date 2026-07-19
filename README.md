@@ -1,4 +1,4 @@
-# Buchscanner für Obsidian – v4
+# Buchscanner für Obsidian – v5
 
 Die PWA scannt ISBN-Barcodes, lädt Metadaten und unterstützt jetzt einen Stapelmodus.
 
@@ -25,3 +25,16 @@ Die PWA scannt ISBN-Barcodes, lädt Metadaten und unterstützt jetzt einen Stape
 ## Veröffentlichung
 
 Alle Dateien in dein GitHub-Pages-Repository kopieren und committen. Danach die Seite einmal mit `?v=4` aufrufen. Bei einer weiterhin alten Oberfläche die installierte Web-App entfernen, Website-Daten löschen und neu installieren.
+
+
+## Scanner-Verbesserungen in v5
+
+- Auswertung des gesamten Kamerabilds statt eines engen Scan-Ausschnitts
+- bevorzugte Rückkamera mit idealerweise 1920×1080 Pixeln
+- kontinuierlicher Autofokus, soweit der Browser ihn freigibt
+- optionaler Zoom-Regler und Kameralicht bei unterstützten Geräten
+- Kamera-Neustart zum erneuten Fokussieren
+- Foto-Modus über die native Kamera als zuverlässiger Fallback
+- die v4-Warteschlange wird beim ersten Start übernommen
+
+Der sichtbare Rahmen ist nur eine Zielhilfe. Er beschneidet den Decoder nicht.

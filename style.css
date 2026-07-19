@@ -180,3 +180,126 @@ button.danger {
     width: 100%;
   }
 }
+
+
+/* Scanner v5: full-frame decoding with a visual guide only. */
+.scanner-shell {
+  position: relative;
+  min-height: 245px;
+  overflow: hidden;
+  border-radius: 14px;
+  background: #171614;
+}
+
+#reader {
+  min-height: 245px;
+}
+
+#reader video,
+#reader canvas,
+#reader img {
+  display: block;
+  width: 100% !important;
+  min-height: 245px;
+  max-height: 64vh;
+  object-fit: cover;
+  border-radius: 14px;
+}
+
+.scan-guide {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+}
+
+.scan-guide::before {
+  content: "";
+  width: min(91%, 560px);
+  height: clamp(105px, 28vw, 175px);
+  border: 3px solid rgba(255,255,255,.92);
+  border-radius: 14px;
+  box-shadow: 0 0 0 999px rgba(0,0,0,.18), inset 0 0 0 1px rgba(0,0,0,.2);
+}
+
+.scan-guide span {
+  position: absolute;
+  bottom: 12px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(0,0,0,.66);
+  color: #fff;
+  font-size: .74rem;
+  font-weight: 750;
+}
+
+.scanner-toolbar {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 9px;
+  margin-top: 12px;
+}
+
+.scanner-toolbar button,
+.file-button {
+  min-height: 44px;
+}
+
+.file-button {
+  display: grid;
+  place-items: center;
+  padding: 10px 14px;
+  border: 1px solid #bcb4a8;
+  border-radius: 11px;
+  background: #ece5d8;
+  font-size: .9rem;
+  font-weight: 750;
+  cursor: pointer;
+  text-align: center;
+}
+
+.file-button input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.zoom-panel {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: 11px;
+  background: rgba(36,33,29,.06);
+}
+
+.zoom-panel label {
+  display: block;
+  white-space: nowrap;
+}
+
+.zoom-panel input[type="range"] {
+  min-height: 34px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.scanner-hint {
+  margin-top: 10px;
+}
+
+@media (max-width: 620px) {
+  .scanner-toolbar {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .scanner-toolbar .file-button {
+    grid-column: 1 / -1;
+  }
+}

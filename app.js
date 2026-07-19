@@ -4,6 +4,12 @@ const els = {
   googleApiKey: document.querySelector("#google-api-key"),
   manualIsbn: document.querySelector("#manual-isbn"),
   lookupButton: document.querySelector("#lookup-button"),
+  cameraRestartButton: document.querySelector("#camera-restart-button"),
+  torchButton: document.querySelector("#torch-button"),
+  photoInput: document.querySelector("#photo-input"),
+  zoomPanel: document.querySelector("#zoom-panel"),
+  zoomSlider: document.querySelector("#zoom-slider"),
+  zoomValue: document.querySelector("#zoom-value"),
   status: document.querySelector("#status"),
   resultCard: document.querySelector("#result-card"),
   title: document.querySelector("#title"),
@@ -42,8 +48,15 @@ let reviewInProgress = false;
 let currentMetadataSource = "manual";
 let batch = [];
 let editingBatchId = null;
+let html5QrCode = null;
+let scannerRunning = false;
+let scannerPaused = false;
+let scannerStarting = null;
+let torchOn = false;
+let zoomTimer = null;
 
-const BATCH_STORAGE_KEY = "bookScanner.batch.v4";
+const BATCH_STORAGE_KEY = "bookScanner.batch.v5";
+const LEGACY_BATCH_STORAGE_KEYS = ["bookScanner.batch.v4"];
 
 function setStatus(message, kind = "") {
   els.status.textContent = message;
@@ -478,8 +491,16 @@ function createId() {
 
 function loadBatch() {
   try {
-    const stored = JSON.parse(localStorage.getItem(BATCH_STORAGE_KEY) ?? "[]");
+    let raw = localStorage.getItem(BATCH_STORAGE_KEY);
+    if (!raw) {
+      for (const legacyKey of LEGACY_BATCH_STORAGE_KEYS) {
+        raw = localStorage.getItem(legacyKey);
+        if (raw) break;
+      }
+    }
+    const stored = JSON.parse(raw ?? "[]");
     batch = Array.isArray(stored) ? stored : [];
+    if (batch.length) saveBatch();
   } catch (error) {
     console.warn("Stapel konnte nicht geladen werden:", error);
     batch = [];
@@ -575,6 +596,7 @@ function resetFormForNextScan() {
   els.batchButton.textContent = "Zum Stapel hinzufügen & weiter";
   reviewInProgress = false;
   updatePreview();
+  ensureScannerReady();
 }
 
 function addCurrentBookToBatch() {
@@ -837,49 +859,269 @@ async function copyMarkdown() {
   }
 }
 
-function startScanner() {
-  if (typeof Html5QrcodeScanner === "undefined") {
-    setStatus("Scanner-Bibliothek nicht geladen. Prüfe die Verbindung und lade neu.", "error");
+function scannerAvailable() {
+  return typeof Html5Qrcode !== "undefined";
+}
+
+function createScannerIfNeeded() {
+  if (html5QrCode || !scannerAvailable()) return;
+  html5QrCode = new Html5Qrcode("reader", {
+    formatsToSupport: [Html5QrcodeSupportedFormats.EAN_13],
+    useBarCodeDetectorIfSupported: true,
+    verbose: false,
+  });
+}
+
+function formatZoom(value) {
+  return `${Number(value).toLocaleString("de-DE", {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1,
+  })}×`;
+}
+
+async function applyCameraEnhancements() {
+  if (!scannerRunning || !html5QrCode) return;
+
+  let capabilities = {};
+  let settings = {};
+  try {
+    capabilities = html5QrCode.getRunningTrackCapabilities() ?? {};
+    settings = html5QrCode.getRunningTrackSettings() ?? {};
+  } catch (error) {
+    console.warn("Kamerafähigkeiten nicht verfügbar:", error);
+  }
+
+  if (Array.isArray(capabilities.focusMode) && capabilities.focusMode.includes("continuous")) {
+    try {
+      await html5QrCode.applyVideoConstraints({
+        advanced: [{ focusMode: "continuous" }],
+      });
+    } catch (error) {
+      console.warn("Kontinuierlicher Autofokus konnte nicht gesetzt werden:", error);
+    }
+  }
+
+  if (capabilities.zoom && Number.isFinite(capabilities.zoom.min) && Number.isFinite(capabilities.zoom.max)) {
+    const min = Number(capabilities.zoom.min);
+    const max = Number(capabilities.zoom.max);
+    const step = Number(capabilities.zoom.step) || 0.1;
+    const current = Math.min(max, Math.max(min, Number(settings.zoom) || min));
+    els.zoomSlider.min = String(min);
+    els.zoomSlider.max = String(max);
+    els.zoomSlider.step = String(step);
+    els.zoomSlider.value = String(current);
+    els.zoomValue.textContent = formatZoom(current);
+    els.zoomPanel.classList.remove("hidden");
+  } else {
+    els.zoomPanel.classList.add("hidden");
+  }
+
+  if (capabilities.torch === true) {
+    els.torchButton.classList.remove("hidden");
+  } else {
+    els.torchButton.classList.add("hidden");
+  }
+
+  const width = settings.width ? `${settings.width}×${settings.height ?? "?"}` : "";
+  setStatus(`Kamera aktiv${width ? ` (${width})` : ""}. Der ganze Bildausschnitt wird ausgewertet.`, "success");
+}
+
+async function handleDecodedBarcode(decodedText) {
+  if (reviewInProgress || lookupInProgress) return;
+
+  const isbn = normalizeIsbn(decodedText);
+  if (isbn === lastScanned) return;
+  lastScanned = isbn;
+  window.setTimeout(() => { lastScanned = ""; }, 2500);
+
+  if (!isBookIsbn(isbn)) {
+    setStatus(`Barcode ${decodedText} erkannt, aber nicht als ISBN-13 eingeordnet.`, "error");
     return;
   }
 
-  const scanner = new Html5QrcodeScanner(
-    "reader",
-    {
-      fps: 10,
-      qrbox: (width, height) => ({
-        width: Math.min(Math.floor(width * 0.88), 430),
-        height: Math.min(Math.floor(height * 0.34), 150),
-      }),
-      formatsToSupport: [Html5QrcodeSupportedFormats.EAN_13],
-      rememberLastUsedCamera: true,
-      showTorchButtonIfSupported: true,
-      aspectRatio: 1.777778,
-    },
-    false
-  );
+  try {
+    if (scannerRunning && !scannerPaused) {
+      html5QrCode.pause(true);
+      scannerPaused = true;
+    }
+  } catch (error) {
+    console.warn("Scanner konnte nicht pausiert werden:", error);
+  }
 
-  scanner.render(
-    (decodedText) => {
-      if (reviewInProgress || lookupInProgress) return;
-      const isbn = normalizeIsbn(decodedText);
-      if (isbn === lastScanned) return;
-      lastScanned = isbn;
-      window.setTimeout(() => { lastScanned = ""; }, 3500);
+  if (navigator.vibrate) navigator.vibrate(45);
+  els.manualIsbn.value = isbn;
+  await lookupBook(isbn);
 
-      if (!isBookIsbn(isbn)) {
-        setStatus(`Barcode ${decodedText} erkannt, aber nicht als ISBN-13 eingeordnet.`, "error");
+  if (!reviewInProgress) resumeScanner();
+}
+
+async function startScanner() {
+  if (!scannerAvailable()) {
+    setStatus("Scanner-Bibliothek nicht geladen. Prüfe die Verbindung und lade neu.", "error");
+    return;
+  }
+  if (scannerRunning) return;
+  if (scannerStarting) return scannerStarting;
+
+  createScannerIfNeeded();
+  scannerStarting = (async () => {
+    setStatus("Rückkamera und Autofokus werden vorbereitet …");
+    const enhancedConfig = {
+      fps: 15,
+      disableFlip: true,
+      // Absichtlich kein qrbox: Der Decoder untersucht das gesamte Videobild.
+      videoConstraints: {
+        facingMode: { ideal: "environment" },
+        width: { ideal: 1920 },
+        height: { ideal: 1080 },
+        frameRate: { ideal: 30, max: 30 },
+      },
+    };
+
+    try {
+      await html5QrCode.start(
+        { facingMode: "environment" },
+        enhancedConfig,
+        (decodedText) => { handleDecodedBarcode(decodedText); },
+        () => {}
+      );
+    } catch (enhancedError) {
+      console.warn("Erweiterte Kameraeinstellungen fehlgeschlagen, versuche Standardmodus:", enhancedError);
+      try {
+        await html5QrCode.start(
+          { facingMode: "environment" },
+          { fps: 12, disableFlip: true },
+          (decodedText) => { handleDecodedBarcode(decodedText); },
+          () => {}
+        );
+      } catch (fallbackError) {
+        console.error(fallbackError);
+        setStatus(`Kamera konnte nicht gestartet werden: ${fallbackError}`, "error");
         return;
       }
+    }
 
-      els.manualIsbn.value = isbn;
-      lookupBook(isbn);
-    },
-    () => {}
-  );
+    scannerRunning = true;
+    scannerPaused = false;
+    torchOn = false;
+    els.torchButton.textContent = "Licht einschalten";
+    await applyCameraEnhancements();
+  })();
+
+  try {
+    await scannerStarting;
+  } finally {
+    scannerStarting = null;
+  }
+}
+
+async function stopScanner() {
+  if (!html5QrCode || !scannerRunning) return;
+  try {
+    await html5QrCode.stop();
+  } catch (error) {
+    console.warn("Scanner konnte nicht sauber gestoppt werden:", error);
+  } finally {
+    scannerRunning = false;
+    scannerPaused = false;
+    torchOn = false;
+  }
+}
+
+function resumeScanner() {
+  if (reviewInProgress || lookupInProgress) return;
+  if (scannerRunning && scannerPaused) {
+    try {
+      html5QrCode.resume();
+      scannerPaused = false;
+      setStatus("Bereit für den nächsten Scan.", "success");
+      return;
+    } catch (error) {
+      console.warn("Scanner konnte nicht fortgesetzt werden:", error);
+    }
+  }
+  if (!scannerRunning) startScanner();
+}
+
+function ensureScannerReady() {
+  window.setTimeout(() => resumeScanner(), 80);
+}
+
+async function restartScanner() {
+  els.cameraRestartButton.disabled = true;
+  setStatus("Kamera wird neu gestartet und fokussiert …");
+  await stopScanner();
+  try {
+    if (html5QrCode) html5QrCode.clear();
+  } catch (error) {
+    console.warn(error);
+  }
+  html5QrCode = null;
+  await startScanner();
+  els.cameraRestartButton.disabled = false;
+}
+
+async function toggleTorch() {
+  if (!scannerRunning || !html5QrCode) return;
+  const next = !torchOn;
+  try {
+    await html5QrCode.applyVideoConstraints({ advanced: [{ torch: next }] });
+    torchOn = next;
+    els.torchButton.textContent = torchOn ? "Licht ausschalten" : "Licht einschalten";
+  } catch (error) {
+    console.warn(error);
+    setStatus("Das Kameralicht lässt sich in diesem Browser nicht steuern.", "error");
+  }
+}
+
+async function applyZoom(value) {
+  if (!scannerRunning || !html5QrCode) return;
+  const zoom = Number(value);
+  els.zoomValue.textContent = formatZoom(zoom);
+  try {
+    await html5QrCode.applyVideoConstraints({ advanced: [{ zoom }] });
+  } catch (error) {
+    console.warn("Zoom konnte nicht gesetzt werden:", error);
+  }
+}
+
+async function scanPhoto(file) {
+  if (!file || !scannerAvailable()) return;
+  els.photoInput.disabled = true;
+  setStatus("Foto wird in voller Auflösung ausgewertet …");
+
+  await stopScanner();
+  createScannerIfNeeded();
+
+  try {
+    const result = await html5QrCode.scanFileV2(file, false);
+    const decodedText = result?.decodedText ?? result;
+    await handleDecodedBarcode(decodedText);
+    if (!reviewInProgress) {
+      setStatus("Auf dem Foto wurde kein nutzbarer ISBN-Barcode erkannt.", "error");
+      await startScanner();
+    }
+  } catch (error) {
+    console.warn(error);
+    setStatus("Auf dem Foto wurde kein Barcode erkannt. Fotografiere ihn möglichst frontal und vollständig.", "error");
+    try { html5QrCode.clear(); } catch (_) {}
+    html5QrCode = null;
+    await startScanner();
+  } finally {
+    els.photoInput.value = "";
+    els.photoInput.disabled = false;
+  }
 }
 
 els.lookupButton.addEventListener("click", () => lookupBook(els.manualIsbn.value));
+els.cameraRestartButton.addEventListener("click", restartScanner);
+els.torchButton.addEventListener("click", toggleTorch);
+els.photoInput.addEventListener("change", () => scanPhoto(els.photoInput.files?.[0]));
+els.zoomSlider.addEventListener("input", () => {
+  els.zoomValue.textContent = formatZoom(els.zoomSlider.value);
+  window.clearTimeout(zoomTimer);
+  zoomTimer = window.setTimeout(() => applyZoom(els.zoomSlider.value), 80);
+});
 els.manualIsbn.addEventListener("keydown", (event) => {
   if (event.key === "Enter") lookupBook(els.manualIsbn.value);
 });
