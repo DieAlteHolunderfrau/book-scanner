@@ -8,3 +8,8 @@
 .settings summary {
   margin-bottom: 12px;
 }
+
+textarea {
+  resize: vertical;
+  min-height: 92px;
+}

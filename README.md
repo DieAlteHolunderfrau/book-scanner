@@ -16,3 +16,8 @@ Die neue Version zeigt bei fehlgeschlagenen Abrufen den tatsächlichen Dienst un
 
 - Open Library: `https://openlibrary.org/isbn/{ISBN}.json`
 - Google Books optional: `https://www.googleapis.com/books/v1/volumes?q=isbn:{ISBN}&key={API_KEY}`
+
+
+## Genres und Schlagwörter
+
+Die ISBN-Abfrage liefert eine konkrete Ausgabe. Für Genres und Themen ruft die App zusätzlich das verknüpfte Open-Library-Werk ab und liest dessen `subjects`. Daraus werden vorsichtige, editierbare Genre-Vorschläge erzeugt. Die vollständigen Open-Library-Schlagwörter werden separat als `subjects` gespeichert, weil sie nicht nur Genres, sondern auch Themen, Orte und Zielgruppen enthalten können.

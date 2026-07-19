@@ -15,6 +15,8 @@ const els = {
   language: document.querySelector("#language"),
   coverUrl: document.querySelector("#cover-url"),
   coverPreview: document.querySelector("#cover-preview"),
+  genres: document.querySelector("#genres"),
+  subjects: document.querySelector("#subjects"),
   ownership: document.querySelector("#ownership"),
   readingStatus: document.querySelector("#reading-status"),
   obsidianButton: document.querySelector("#obsidian-button"),
@@ -56,8 +58,35 @@ function isBookIsbn(isbn) {
   return /^\d{13}$/.test(isbn) && (isbn.startsWith("978") || isbn.startsWith("979"));
 }
 
+function splitList(value) {
+  return String(value ?? "")
+    .split(/[;\n]/)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
 function splitAuthors(value) {
-  return String(value ?? "").split(";").map((name) => name.trim()).filter(Boolean);
+  return splitList(value);
+}
+
+function uniqueStrings(values) {
+  const seen = new Set();
+  return values.filter((value) => {
+    const normalized = String(value ?? "").trim();
+    const key = normalized.toLocaleLowerCase("de");
+    if (!normalized || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function appendYamlList(lines, key, values) {
+  lines.push(`${key}:`);
+  if (values.length) {
+    for (const value of values) lines.push(`  - ${yamlString(value)}`);
+  } else {
+    lines.push("  -");
+  }
 }
 
 function yamlString(value) {
@@ -91,6 +120,8 @@ function getFormData() {
     pages: digitsOnly(els.pages.value),
     language: els.language.value.trim(),
     coverUrl: els.coverUrl.value.trim().replace(/^http:\/\//i, "https://"),
+    genres: splitList(els.genres.value),
+    subjects: splitList(els.subjects.value),
     ownership: els.ownership.value,
     readingStatus: els.readingStatus.value,
   };
@@ -107,6 +138,9 @@ function buildMarkdown() {
   } else {
     lines.push("  -");
   }
+
+  appendYamlList(lines, "genres", book.genres);
+  appendYamlList(lines, "subjects", book.subjects);
 
   lines.push(
     `isbn_13: ${yamlString(book.isbn)}`,
@@ -190,6 +224,62 @@ function languageCodes(languages) {
     .join(", ");
 }
 
+
+const GENRE_RULES = [
+  ["Horror", /\b(horror|horror tales|horror fiction|ghost stories|supernatural fiction|weird fiction|grusel|schauerroman)\b/i],
+  ["Science-Fiction", /\b(science fiction|sci-fi|space opera|cyberpunk|dystopi|time travel fiction|science-fiction)\b/i],
+  ["Fantasy", /\b(fantasy|fantastic fiction|epic fantasy|urban fantasy|dark fantasy|high fantasy)\b/i],
+  ["Krimi", /\b(mystery fiction|detective stories|detective and mystery|crime fiction|police procedural|murder mysteries|kriminalroman|detektiv)\b/i],
+  ["Thriller", /\b(thrillers?|suspense fiction|psychological suspense)\b/i],
+  ["Historischer Roman", /\b(historical fiction|historischer roman)\b/i],
+  ["Liebesroman", /\b(romance fiction|love stories|romantic fiction|liebesroman)\b/i],
+  ["Literarische Fiktion", /\b(literary fiction|literarische fiktion)\b/i],
+  ["Jugendbuch", /\b(young adult fiction|young adult literature|jugendbuch|jugendliteratur)\b/i],
+  ["Kinderbuch", /\b(children'?s fiction|children'?s stories|juvenile literature|kinderbuch|kinderliteratur)\b/i],
+  ["Graphic Novel / Comic", /\b(graphic novels?|comic books?|comics|manga)\b/i],
+  ["Lyrik", /\b(poetry|poems|lyrik|gedichte)\b/i],
+  ["Drama", /\b(drama|plays|theaterstücke)\b/i],
+  ["Biografie", /\b(biography|biographies|biografie|biographien)\b/i],
+  ["Memoir / Autobiografie", /\b(memoir|memoirs|autobiography|autobiographies|autobiografie)\b/i],
+  ["Essay", /\b(essays?|essayistik)\b/i],
+  ["True Crime", /\b(true crime|criminal biography)\b/i],
+  ["Geschichte", /\b(history|geschichte|historical studies)\b/i],
+  ["Philosophie", /\b(philosophy|philosophie)\b/i],
+  ["Psychologie", /\b(psychology|psychologie)\b/i],
+  ["Politik", /\b(politics|political science|politik)\b/i],
+  ["Reise", /\b(travel|travel writing|reiseberichte|reisen)\b/i],
+  ["Wissenschaft", /\b(science|natural history|wissenschaft)\b/i],
+];
+
+function inferGenres(subjects) {
+  const genres = [];
+  for (const [genre, pattern] of GENRE_RULES) {
+    if (subjects.some((subject) => pattern.test(subject))) genres.push(genre);
+  }
+  return genres;
+}
+
+function normalizeSubjects(subjects) {
+  if (!Array.isArray(subjects)) return [];
+  return uniqueStrings(
+    subjects
+      .map((subject) => typeof subject === "string" ? subject : subject?.name ?? "")
+      .map((subject) => subject.trim())
+      .filter(Boolean)
+  ).slice(0, 40);
+}
+
+async function resolveOpenLibraryWork(edition) {
+  const workKey = Array.isArray(edition?.works) ? edition.works[0]?.key : "";
+  if (!workKey || !String(workKey).startsWith("/works/")) return null;
+  try {
+    return await fetchJson(`https://openlibrary.org${workKey}.json`, "Open Library Werk");
+  } catch (error) {
+    console.warn(error);
+    return null;
+  }
+}
+
 async function resolveOpenLibraryAuthors(authors) {
   if (!Array.isArray(authors) || authors.length === 0) return [];
 
@@ -216,17 +306,26 @@ async function lookupOpenLibrary(isbn) {
     `https://openlibrary.org/isbn/${encodeURIComponent(isbn)}.json`,
     "Open Library"
   );
-  const authors = await resolveOpenLibraryAuthors(edition.authors);
+  const [authors, work] = await Promise.all([
+    resolveOpenLibraryAuthors(edition.authors),
+    resolveOpenLibraryWork(edition),
+  ]);
   const coverId = Array.isArray(edition.covers) ? edition.covers.find((id) => Number(id) > 0) : null;
+  const subjects = normalizeSubjects([
+    ...(Array.isArray(edition.subjects) ? edition.subjects : []),
+    ...(Array.isArray(work?.subjects) ? work.subjects : []),
+  ]);
 
   return {
-    title: edition.title ?? "",
+    title: edition.title ?? work?.title ?? "",
     authors,
     publisher: Array.isArray(edition.publishers) ? edition.publishers[0] ?? "" : edition.publishers ?? "",
-    publishedDate: edition.publish_date ?? "",
+    publishedDate: edition.publish_date ?? work?.first_publish_date ?? "",
     pages: edition.number_of_pages ?? edition.pagination ?? "",
     language: languageCodes(edition.languages),
     coverUrl: coverId ? `https://covers.openlibrary.org/b/id/${coverId}-L.jpg` : "",
+    genres: inferGenres(subjects),
+    subjects,
     source: "open-library",
   };
 }
@@ -256,6 +355,8 @@ async function lookupGoogleBooks(isbn, apiKey) {
     language: info.language ?? "",
     coverUrl: String(imageLinks.thumbnail ?? imageLinks.smallThumbnail ?? "")
       .replace(/^http:\/\//i, "https://"),
+    genres: Array.isArray(info.categories) ? info.categories : [],
+    subjects: [],
     source: "google-books",
   };
 }
@@ -269,6 +370,8 @@ function applyBookData(isbn, book) {
   els.pages.value = digitsOnly(book?.pages ?? "");
   els.language.value = book?.language ?? "";
   els.coverUrl.value = book?.coverUrl ?? "";
+  els.genres.value = Array.isArray(book?.genres) ? book.genres.join("; ") : "";
+  els.subjects.value = Array.isArray(book?.subjects) ? book.subjects.join("; ") : "";
   currentMetadataSource = book?.source ?? "manual";
   els.resultCard.classList.remove("hidden");
   updatePreview();
@@ -432,7 +535,7 @@ els.vault.addEventListener("change", saveSettings);
 els.folder.addEventListener("change", saveSettings);
 els.googleApiKey.addEventListener("change", saveSettings);
 
-for (const input of els.resultCard.querySelectorAll("input, select")) {
+for (const input of els.resultCard.querySelectorAll("input, select, textarea")) {
   input.addEventListener("input", updatePreview);
   input.addEventListener("change", updatePreview);
 }
