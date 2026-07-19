@@ -19,14 +19,31 @@ const els = {
   subjects: document.querySelector("#subjects"),
   ownership: document.querySelector("#ownership"),
   readingStatus: document.querySelector("#reading-status"),
+  batchButton: document.querySelector("#batch-button"),
   obsidianButton: document.querySelector("#obsidian-button"),
   copyButton: document.querySelector("#copy-button"),
   markdownPreview: document.querySelector("#markdown-preview"),
+  queueCard: document.querySelector("#queue-card"),
+  queueCount: document.querySelector("#queue-count"),
+  queueEmpty: document.querySelector("#queue-empty"),
+  queueList: document.querySelector("#queue-list"),
+  queueActions: document.querySelector("#queue-actions"),
+  queueStatus: document.querySelector("#queue-status"),
+  exportNextButton: document.querySelector("#export-next-button"),
+  zipButton: document.querySelector("#zip-button"),
+  resetExportButton: document.querySelector("#reset-export-button"),
+  clearQueueButton: document.querySelector("#clear-queue-button"),
+  scrollScannerButton: document.querySelector("#scroll-scanner-button"),
 };
 
 let lastScanned = "";
 let lookupInProgress = false;
+let reviewInProgress = false;
 let currentMetadataSource = "manual";
+let batch = [];
+let editingBatchId = null;
+
+const BATCH_STORAGE_KEY = "bookScanner.batch.v4";
 
 function setStatus(message, kind = "") {
   els.status.textContent = message;
@@ -124,11 +141,12 @@ function getFormData() {
     subjects: splitList(els.subjects.value),
     ownership: els.ownership.value,
     readingStatus: els.readingStatus.value,
+    metadataSource: currentMetadataSource,
+    added: todayIso(),
   };
 }
 
-function buildMarkdown() {
-  const book = getFormData();
+function buildMarkdown(book = getFormData()) {
   const lines = ["---", "type: book", `title: ${yamlString(book.title)}`, "authors:"];
 
   if (book.authors.length) {
@@ -139,8 +157,8 @@ function buildMarkdown() {
     lines.push("  -");
   }
 
-  appendYamlList(lines, "genres", book.genres);
-  appendYamlList(lines, "subjects", book.subjects);
+  appendYamlList(lines, "genres", book.genres ?? []);
+  appendYamlList(lines, "subjects", book.subjects ?? []);
 
   lines.push(
     `isbn_13: ${yamlString(book.isbn)}`,
@@ -151,8 +169,8 @@ function buildMarkdown() {
     `cover_url: ${yamlString(book.coverUrl)}`,
     `ownership: ${book.ownership}`,
     `reading_status: ${book.readingStatus}`,
-    `added: ${todayIso()}`,
-    `metadata_source: ${currentMetadataSource}`,
+    `added: ${book.added || todayIso()}`,
+    `metadata_source: ${book.metadataSource || "manual"}`,
     "---",
     "",
     `# ${book.title}`,
@@ -171,7 +189,7 @@ function buildMarkdown() {
 }
 
 function updatePreview() {
-  els.markdownPreview.textContent = buildMarkdown();
+  els.markdownPreview.textContent = buildMarkdown(getFormData());
   const cover = els.coverUrl.value.trim().replace(/^http:\/\//i, "https://");
   if (cover) {
     els.coverPreview.src = cover;
@@ -373,6 +391,7 @@ function applyBookData(isbn, book) {
   els.genres.value = Array.isArray(book?.genres) ? book.genres.join("; ") : "";
   els.subjects.value = Array.isArray(book?.subjects) ? book.subjects.join("; ") : "";
   currentMetadataSource = book?.source ?? "manual";
+  reviewInProgress = true;
   els.resultCard.classList.remove("hidden");
   updatePreview();
 }
@@ -382,6 +401,13 @@ async function lookupBook(rawIsbn) {
 
   if (!isBookIsbn(isbn)) {
     setStatus("Bitte eine gültige ISBN-10 oder ISBN-13 eines Buches eingeben.", "error");
+    return;
+  }
+  const duplicate = batch.find((book) => book.isbn === isbn && book.id !== editingBatchId);
+  if (duplicate) {
+    setStatus(`ISBN ${isbn} befindet sich bereits im Stapel.`, "error");
+    renderBatch();
+    els.queueCard.scrollIntoView({ behavior: "smooth", block: "start" });
     return;
   }
   if (lookupInProgress) return;
@@ -445,38 +471,365 @@ function loadSettings() {
   els.googleApiKey.value = localStorage.getItem("bookScanner.googleApiKey") ?? "";
 }
 
-function openInObsidian() {
-  const book = getFormData();
+function createId() {
+  if (globalThis.crypto?.randomUUID) return crypto.randomUUID();
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
 
-  if (!book.vault) {
-    setStatus("Trage zuerst den exakten Namen deines Obsidian-Vaults ein.", "error");
+function loadBatch() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(BATCH_STORAGE_KEY) ?? "[]");
+    batch = Array.isArray(stored) ? stored : [];
+  } catch (error) {
+    console.warn("Stapel konnte nicht geladen werden:", error);
+    batch = [];
+  }
+}
+
+function saveBatch() {
+  localStorage.setItem(BATCH_STORAGE_KEY, JSON.stringify(batch));
+}
+
+function setQueueStatus(message, kind = "") {
+  els.queueStatus.textContent = message;
+  els.queueStatus.className = `status ${kind}`.trim();
+}
+
+function bookFilename(book) {
+  const titlePart = safeFilename(book.title) || "Unbenanntes Buch";
+  const authorPart = book.authors?.[0] ? ` - ${safeFilename(book.authors[0])}` : "";
+  return `${book.isbn} - ${titlePart}${authorPart}.md`;
+}
+
+function bookVaultPath(book) {
+  const folder = els.folder.value.trim().replace(/^\/+|\/+$/g, "");
+  const filename = bookFilename(book).replace(/\.md$/i, "");
+  return folder ? `${folder}/${filename}` : filename;
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+function renderBatch() {
+  els.queueCount.textContent = String(batch.length);
+  els.queueEmpty.classList.toggle("hidden", batch.length > 0);
+  els.queueActions.classList.toggle("hidden", batch.length === 0);
+
+  const pending = batch.filter((book) => !book.exported).length;
+  els.exportNextButton.textContent = pending
+    ? `Nächstes in Obsidian exportieren (${pending} offen)`
+    : "Alle als exportiert markiert";
+  els.exportNextButton.disabled = pending === 0;
+
+  els.queueList.innerHTML = batch.map((book, index) => {
+    const author = book.authors?.join(", ") || "Autor unbekannt";
+    const cover = book.coverUrl
+      ? `<img src="${escapeHtml(book.coverUrl)}" alt="" loading="lazy">`
+      : `<div class="queue-cover-placeholder" aria-hidden="true">${index + 1}</div>`;
+    const badge = book.exported
+      ? '<span class="status-badge exported">exportiert</span>'
+      : '<span class="status-badge pending">offen</span>';
+    return `
+      <article class="queue-item" data-id="${escapeHtml(book.id)}">
+        ${cover}
+        <div class="queue-item-main">
+          <div class="queue-title-row">
+            <strong>${escapeHtml(book.title || "Unbenanntes Buch")}</strong>
+            ${badge}
+          </div>
+          <p>${escapeHtml(author)}</p>
+          <small>${escapeHtml(book.isbn)}${book.genres?.length ? ` · ${escapeHtml(book.genres.join(", "))}` : ""}</small>
+        </div>
+        <div class="queue-item-actions">
+          <button type="button" data-action="edit">Bearbeiten</button>
+          <button type="button" data-action="toggle-export">${book.exported ? "Erneut" : "Als erledigt"}</button>
+          <button type="button" data-action="delete" class="danger">Löschen</button>
+        </div>
+      </article>`;
+  }).join("");
+}
+
+function resetFormForNextScan() {
+  editingBatchId = null;
+  currentMetadataSource = "manual";
+  els.manualIsbn.value = "";
+  els.isbn.value = "";
+  els.title.value = "";
+  els.authors.value = "";
+  els.publisher.value = "";
+  els.publishedDate.value = "";
+  els.pages.value = "";
+  els.language.value = "";
+  els.coverUrl.value = "";
+  els.genres.value = "";
+  els.subjects.value = "";
+  els.coverPreview.removeAttribute("src");
+  els.coverPreview.hidden = true;
+  els.resultCard.classList.add("hidden");
+  els.batchButton.textContent = "Zum Stapel hinzufügen & weiter";
+  reviewInProgress = false;
+  updatePreview();
+}
+
+function addCurrentBookToBatch() {
+  const book = getFormData();
+  if (!book.title || !isBookIsbn(book.isbn)) {
+    setStatus("Titel und gültige ISBN müssen vorhanden sein.", "error");
+    return;
+  }
+
+  const duplicate = batch.find((entry) => entry.isbn === book.isbn && entry.id !== editingBatchId);
+  if (duplicate) {
+    setStatus(`ISBN ${book.isbn} befindet sich bereits im Stapel.`, "error");
+    return;
+  }
+
+  if (editingBatchId) {
+    const index = batch.findIndex((entry) => entry.id === editingBatchId);
+    if (index >= 0) {
+      batch[index] = { ...batch[index], ...book, id: editingBatchId };
+      setQueueStatus(`„${book.title}“ wurde aktualisiert.`, "success");
+    }
+  } else {
+    batch.push({ ...book, id: createId(), exported: false, queuedAt: new Date().toISOString() });
+    setQueueStatus(`„${book.title}“ wurde zum Stapel hinzugefügt.`, "success");
+  }
+
+  saveBatch();
+  renderBatch();
+  resetFormForNextScan();
+  setStatus(`${batch.length} Buch${batch.length === 1 ? "" : "er"} im Stapel. Bereit für den nächsten Scan.`, "success");
+  document.querySelector("#reader").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function editBatchBook(id) {
+  const book = batch.find((entry) => entry.id === id);
+  if (!book) return;
+  editingBatchId = id;
+  currentMetadataSource = book.metadataSource || "manual";
+  applyBookData(book.isbn, {
+    title: book.title,
+    authors: book.authors,
+    publisher: book.publisher,
+    publishedDate: book.publishedDate,
+    pages: book.pages,
+    language: book.language,
+    coverUrl: book.coverUrl,
+    genres: book.genres,
+    subjects: book.subjects,
+    source: book.metadataSource,
+  });
+  els.ownership.value = book.ownership || "owned";
+  els.readingStatus.value = book.readingStatus || "unread";
+  els.batchButton.textContent = "Änderungen speichern & weiter";
+  updatePreview();
+  els.resultCard.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function removeBatchBook(id) {
+  const book = batch.find((entry) => entry.id === id);
+  batch = batch.filter((entry) => entry.id !== id);
+  saveBatch();
+  renderBatch();
+  setQueueStatus(book ? `„${book.title}“ wurde entfernt.` : "Eintrag wurde entfernt.");
+}
+
+function toggleExportStatus(id) {
+  const book = batch.find((entry) => entry.id === id);
+  if (!book) return;
+  book.exported = !book.exported;
+  saveBatch();
+  renderBatch();
+}
+
+function buildObsidianUri(book) {
+  const vault = els.vault.value.trim();
+  if (!vault) throw new Error("Trage zuerst den exakten Namen deines Obsidian-Vaults ein.");
+  const file = bookVaultPath(book);
+  return `obsidian://new?vault=${encodeURIComponent(vault)}` +
+    `&file=${encodeURIComponent(file)}` +
+    `&content=${encodeURIComponent(buildMarkdown(book))}`;
+}
+
+function openBookInObsidian(book, markExported = false) {
+  saveSettings();
+  let uri;
+  try {
+    uri = buildObsidianUri(book);
+  } catch (error) {
+    setStatus(error.message, "error");
     els.vault.focus();
     return;
   }
-  if (!book.title || !book.isbn) {
-    setStatus("Titel und ISBN müssen vorhanden sein.", "error");
+
+  if (markExported) {
+    book.exported = true;
+    book.exportedAt = new Date().toISOString();
+    saveBatch();
+    renderBatch();
+    setQueueStatus(`„${book.title}“ wird an Obsidian übergeben. Kehre danach für das nächste Buch zurück.`, "success");
+  }
+  window.location.href = uri;
+}
+
+function exportNextBook() {
+  const next = batch.find((book) => !book.exported);
+  if (!next) {
+    setQueueStatus("Alle Bücher sind als exportiert markiert.", "success");
     return;
   }
+  openBookInObsidian(next, true);
+}
 
-  saveSettings();
+function crc32(bytes) {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
 
-  const titlePart = safeFilename(book.title) || "Unbenanntes Buch";
-  const authorPart = book.authors[0] ? ` - ${safeFilename(book.authors[0])}` : "";
-  const filename = `${book.isbn} - ${titlePart}${authorPart}`;
-  const file = book.folder ? `${book.folder}/${filename}` : filename;
-  const markdown = buildMarkdown();
+function dosDateTime(date = new Date()) {
+  const year = Math.max(1980, date.getFullYear());
+  return {
+    time: (date.getHours() << 11) | (date.getMinutes() << 5) | Math.floor(date.getSeconds() / 2),
+    date: ((year - 1980) << 9) | ((date.getMonth() + 1) << 5) | date.getDate(),
+  };
+}
 
-  const uri =
-    `obsidian://new?vault=${encodeURIComponent(book.vault)}` +
-    `&file=${encodeURIComponent(file)}` +
-    `&content=${encodeURIComponent(markdown)}`;
+function makeZip(files) {
+  const encoder = new TextEncoder();
+  const localParts = [];
+  const centralParts = [];
+  let offset = 0;
+  const now = dosDateTime();
 
-  window.location.href = uri;
+  const u16 = (view, pos, value) => view.setUint16(pos, value, true);
+  const u32 = (view, pos, value) => view.setUint32(pos, value >>> 0, true);
+
+  for (const file of files) {
+    const name = encoder.encode(file.name.replace(/\\/g, "/"));
+    const content = encoder.encode(file.content);
+    const crc = crc32(content);
+
+    const local = new Uint8Array(30 + name.length);
+    const lv = new DataView(local.buffer);
+    u32(lv, 0, 0x04034b50);
+    u16(lv, 4, 20);
+    u16(lv, 6, 0x0800);
+    u16(lv, 8, 0);
+    u16(lv, 10, now.time);
+    u16(lv, 12, now.date);
+    u32(lv, 14, crc);
+    u32(lv, 18, content.length);
+    u32(lv, 22, content.length);
+    u16(lv, 26, name.length);
+    u16(lv, 28, 0);
+    local.set(name, 30);
+    localParts.push(local, content);
+
+    const central = new Uint8Array(46 + name.length);
+    const cv = new DataView(central.buffer);
+    u32(cv, 0, 0x02014b50);
+    u16(cv, 4, 20);
+    u16(cv, 6, 20);
+    u16(cv, 8, 0x0800);
+    u16(cv, 10, 0);
+    u16(cv, 12, now.time);
+    u16(cv, 14, now.date);
+    u32(cv, 16, crc);
+    u32(cv, 20, content.length);
+    u32(cv, 24, content.length);
+    u16(cv, 28, name.length);
+    u16(cv, 30, 0);
+    u16(cv, 32, 0);
+    u16(cv, 34, 0);
+    u16(cv, 36, 0);
+    u32(cv, 38, 0);
+    u32(cv, 42, offset);
+    central.set(name, 46);
+    centralParts.push(central);
+
+    offset += local.length + content.length;
+  }
+
+  const centralSize = centralParts.reduce((sum, part) => sum + part.length, 0);
+  const end = new Uint8Array(22);
+  const ev = new DataView(end.buffer);
+  u32(ev, 0, 0x06054b50);
+  u16(ev, 4, 0);
+  u16(ev, 6, 0);
+  u16(ev, 8, files.length);
+  u16(ev, 10, files.length);
+  u32(ev, 12, centralSize);
+  u32(ev, 16, offset);
+  u16(ev, 20, 0);
+
+  return new Blob([...localParts, ...centralParts, end], { type: "application/zip" });
+}
+
+function downloadBatchZip() {
+  if (!batch.length) return;
+  const folder = els.folder.value.trim().replace(/^\/+|\/+$/g, "");
+  const files = batch.map((book) => ({
+    name: `${folder ? `${folder}/` : ""}${bookFilename(book)}`,
+    content: buildMarkdown(book),
+  }));
+  const blob = makeZip(files);
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `obsidian-buecher-${todayIso()}.zip`;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1500);
+  setQueueStatus(`${batch.length} Markdown-Datei${batch.length === 1 ? "" : "en"} wurden als ZIP erstellt.`, "success");
+}
+
+function resetExportStatus() {
+  for (const book of batch) {
+    book.exported = false;
+    delete book.exportedAt;
+  }
+  saveBatch();
+  renderBatch();
+  setQueueStatus("Der Exportstatus wurde für den gesamten Stapel zurückgesetzt.");
+}
+
+function clearBatch() {
+  if (!batch.length) return;
+  const confirmed = window.confirm(`Wirklich alle ${batch.length} Bücher aus dem Stapel entfernen?`);
+  if (!confirmed) return;
+  batch = [];
+  editingBatchId = null;
+  saveBatch();
+  renderBatch();
+  resetFormForNextScan();
+  setQueueStatus("Der Stapel wurde geleert.");
+}
+
+function openInObsidian() {
+  const book = getFormData();
+  if (!book.title || !isBookIsbn(book.isbn)) {
+    setStatus("Titel und gültige ISBN müssen vorhanden sein.", "error");
+    return;
+  }
+  openBookInObsidian(book, false);
 }
 
 async function copyMarkdown() {
   try {
-    await navigator.clipboard.writeText(buildMarkdown());
+    await navigator.clipboard.writeText(buildMarkdown(getFormData()));
     setStatus("Markdown wurde in die Zwischenablage kopiert.", "success");
   } catch (error) {
     console.error(error);
@@ -508,6 +861,7 @@ function startScanner() {
 
   scanner.render(
     (decodedText) => {
+      if (reviewInProgress || lookupInProgress) return;
       const isbn = normalizeIsbn(decodedText);
       if (isbn === lastScanned) return;
       lastScanned = isbn;
@@ -529,8 +883,26 @@ els.lookupButton.addEventListener("click", () => lookupBook(els.manualIsbn.value
 els.manualIsbn.addEventListener("keydown", (event) => {
   if (event.key === "Enter") lookupBook(els.manualIsbn.value);
 });
+els.batchButton.addEventListener("click", addCurrentBookToBatch);
 els.obsidianButton.addEventListener("click", openInObsidian);
 els.copyButton.addEventListener("click", copyMarkdown);
+els.exportNextButton.addEventListener("click", exportNextBook);
+els.zipButton.addEventListener("click", downloadBatchZip);
+els.resetExportButton.addEventListener("click", resetExportStatus);
+els.clearQueueButton.addEventListener("click", clearBatch);
+els.scrollScannerButton.addEventListener("click", () => {
+  resetFormForNextScan();
+  document.querySelector("#reader").scrollIntoView({ behavior: "smooth", block: "start" });
+});
+els.queueList.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-action]");
+  const item = event.target.closest(".queue-item");
+  if (!button || !item) return;
+  const id = item.dataset.id;
+  if (button.dataset.action === "edit") editBatchBook(id);
+  if (button.dataset.action === "toggle-export") toggleExportStatus(id);
+  if (button.dataset.action === "delete") removeBatchBook(id);
+});
 els.vault.addEventListener("change", saveSettings);
 els.folder.addEventListener("change", saveSettings);
 els.googleApiKey.addEventListener("change", saveSettings);
@@ -541,6 +913,8 @@ for (const input of els.resultCard.querySelectorAll("input, select, textarea")) 
 }
 
 loadSettings();
+loadBatch();
+renderBatch();
 updatePreview();
 startScanner();
 

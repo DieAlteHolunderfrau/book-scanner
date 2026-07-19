@@ -1,23 +1,27 @@
-# Buchscanner für Obsidian – Version 2
+# Buchscanner für Obsidian – v4
 
-Die Metadatensuche verwendet jetzt zuerst Open Library ohne API-Key. Optional kann unter „Google-Books-Fallback“ ein Google Books API-Key lokal im Browser hinterlegt werden.
+Die PWA scannt ISBN-Barcodes, lädt Metadaten und unterstützt jetzt einen Stapelmodus.
 
-## Fehlerbehebung nach dem Update
+## Stapelmodus
 
-Die erste Version hatte einen Cache-First-Service-Worker. Dadurch kann das Telefon trotz neuer Dateien noch die alte App anzeigen.
+1. Buch scannen und Metadaten prüfen.
+2. **Zum Stapel hinzufügen & weiter** wählen.
+3. Die Prüfansicht wird geleert und die Kamera ist für das nächste Buch bereit.
+4. Der Stapel bleibt im lokalen Browser-Speicher erhalten – auch nach einem Neuladen.
 
-1. Neue Dateien vollständig auf GitHub hochladen und committen.
-2. Die Seite im Browser einmal neu laden.
-3. Falls weiterhin die alte Fehlermeldung erscheint: installierte Web-App löschen und neu installieren oder Website-Daten/Cache für die Pages-Adresse löschen.
+## Export
 
-Die neue Version zeigt bei fehlgeschlagenen Abrufen den tatsächlichen Dienst und HTTP-Status an.
+- **Nächstes in Obsidian exportieren:** öffnet pro Klick eine neue Markdown-Notiz über `obsidian://new`. Mobile Browser blockieren automatische Serien externer App-Aufrufe, daher erfolgt dieser Export schrittweise.
+- **Alle Markdown-Dateien als ZIP:** erzeugt ohne zusätzliche Bibliothek ein ZIP mit einer `.md`-Datei je Buch. Der konfigurierte Obsidian-Ordner ist im ZIP enthalten. Entpacke den Inhalt im Root deines Vaults.
 
-## Datenquellen
+## Weitere Funktionen
 
-- Open Library: `https://openlibrary.org/isbn/{ISBN}.json`
-- Google Books optional: `https://www.googleapis.com/books/v1/volumes?q=isbn:{ISBN}&key={API_KEY}`
+- Open Library als primäre Datenquelle
+- optionaler Google-Books-Fallback mit API-Key
+- Genre-Vorschläge aus Open-Library-Subjects
+- Stapel bearbeiten, Einträge löschen, Exportstatus zurücksetzen
+- ISBN-Dubletten innerhalb des aktuellen Stapels verhindern
 
+## Veröffentlichung
 
-## Genres und Schlagwörter
-
-Die ISBN-Abfrage liefert eine konkrete Ausgabe. Für Genres und Themen ruft die App zusätzlich das verknüpfte Open-Library-Werk ab und liest dessen `subjects`. Daraus werden vorsichtige, editierbare Genre-Vorschläge erzeugt. Die vollständigen Open-Library-Schlagwörter werden separat als `subjects` gespeichert, weil sie nicht nur Genres, sondern auch Themen, Orte und Zielgruppen enthalten können.
+Alle Dateien in dein GitHub-Pages-Repository kopieren und committen. Danach die Seite einmal mit `?v=4` aufrufen. Bei einer weiterhin alten Oberfläche die installierte Web-App entfernen, Website-Daten löschen und neu installieren.

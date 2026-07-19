@@ -16,7 +16,7 @@
     <header>
       <p class="eyebrow">OBSIDIAN-BEGLEITER</p>
       <h1>Buchscanner</h1>
-      <p>ISBN scannen, Metadaten prüfen und als Markdown-Notiz in Obsidian anlegen.</p>
+      <p>ISBNs nacheinander scannen, kurz prüfen und gesammelt in deinen Obsidian-Vault übernehmen.</p>
     </header>
 
     <section class="card">
@@ -97,8 +97,9 @@
         </label>
       </div>
 
-      <div class="actions">
-        <button id="obsidian-button" type="button" class="primary">In Obsidian anlegen</button>
+      <div class="actions three">
+        <button id="batch-button" type="button" class="primary">Zum Stapel hinzufügen &amp; weiter</button>
+        <button id="obsidian-button" type="button">Direkt in Obsidian</button>
         <button id="copy-button" type="button">Markdown kopieren</button>
       </div>
 
@@ -106,6 +107,28 @@
         <summary>Markdown-Vorschau</summary>
         <pre id="markdown-preview"></pre>
       </details>
+    </section>
+
+    <section id="queue-card" class="card queue-card">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">BULK-MODUS</p>
+          <h2>4. Stapel <span id="queue-count" class="count-badge">0</span></h2>
+        </div>
+        <button id="scroll-scanner-button" type="button" class="compact">Weiter scannen</button>
+      </div>
+
+      <p id="queue-empty" class="hint">Noch keine Bücher im Stapel. Nach jeder Prüfung „Zum Stapel hinzufügen &amp; weiter“ wählen.</p>
+      <div id="queue-list" class="queue-list"></div>
+
+      <div id="queue-actions" class="queue-actions hidden">
+        <button id="export-next-button" type="button" class="primary">Nächstes in Obsidian exportieren</button>
+        <button id="zip-button" type="button">Alle Markdown-Dateien als ZIP</button>
+        <button id="reset-export-button" type="button">Exportstatus zurücksetzen</button>
+        <button id="clear-queue-button" type="button" class="danger">Stapel leeren</button>
+      </div>
+      <p id="queue-status" class="status" aria-live="polite"></p>
+      <p class="hint">Mobile Browser dürfen nicht automatisch viele Obsidian-Links hintereinander öffnen. Der Einzel-Export arbeitet deshalb die Warteschlange schrittweise ab. Das ZIP enthält alle Notizen auf einmal.</p>
     </section>
   </main>
 
