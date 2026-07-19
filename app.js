@@ -289,21 +289,16 @@ function buildMarkdown(book = getFormData()) {
     `publisher: ${yamlString(book.publisher)}`,
     `publication_date: ${yamlString(book.publishedDate)}`,
     `pages: ${book.pages || "null"}`,
-    `language: ${yamlString(book.language)}`,
-    `cover_url: ${yamlString(book.coverUrl)}`,
-    `ownership: ${book.ownership}`,
     `reading_status: ${book.readingStatus}`,
     `added: ${book.added || todayIso()}`,
     `metadata_source: ${book.metadataSource || "manual"}`,
     "---",
     "",
-    "# Leseverlauf",
-    "",
     "# Notizen",
     "",
     "# Zitate",
     "",
-    "# Eindruck",
+    "# Review",
     ""
   );
 
