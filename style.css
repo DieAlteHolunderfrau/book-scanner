@@ -345,7 +345,7 @@ button.danger {
 }
 
 
-/* Scanner v8: ausschließlich manuell gestartete Erkennungsläufe. */
+/* Scanner v9: ausschließlich manuell gestartete Erkennungsläufe. */
 .recognition-button {
   margin-top: 12px;
   min-height: 56px;

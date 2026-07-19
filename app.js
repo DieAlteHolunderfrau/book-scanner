@@ -68,8 +68,9 @@ let zoomTimer = null;
 
 const RECOGNITION_ATTEMPTS = 5;
 const RECOGNITION_INTERVAL_MS = 1000;
-const BATCH_STORAGE_KEY = "bookScanner.batch.v8";
+const BATCH_STORAGE_KEY = "bookScanner.batch.v9";
 const LEGACY_BATCH_STORAGE_KEYS = [
+  "bookScanner.batch.v8",
   "bookScanner.batch.v7",
   "bookScanner.batch.v6",
   "bookScanner.batch.v5",
@@ -1004,28 +1005,90 @@ async function getOcrWorker() {
   return ocrWorker;
 }
 
-function normalizeOcrCandidate(value) {
+const OCR_DIGIT_ALTERNATIVES = Object.freeze({
+  O: ["0"],
+  Q: ["0"],
+  D: ["0"],
+  I: ["1"],
+  L: ["1"],
+  "|": ["1"],
+  "!": ["1"],
+  Z: ["2"],
+  A: ["4"],
+  S: ["5"],
+  G: ["6"],
+  B: ["6", "8"],
+  T: ["7"],
+});
+
+function ocrSymbolAlternatives(char, position, targetLength) {
+  if (/\d/.test(char)) return [char];
+  if (char === "X" && targetLength === 10 && position === 9) return ["X"];
+  return OCR_DIGIT_ALTERNATIVES[char] ?? [];
+}
+
+function ocrSymbolStream(value) {
   return String(value ?? "")
     .toUpperCase()
     .replace(/[—–−]/g, "-")
-    .replace(/O/g, "0")
-    .replace(/[IL|]/g, "1")
-    .replace(/[^0-9X]/g, "");
+    .split("")
+    .filter((char) => /\d/.test(char) || char === "X" || char in OCR_DIGIT_ALTERNATIVES)
+    .join("");
+}
+
+function expandOcrWindow(windowText, targetLength, maxVariants = 256) {
+  let variants = [""];
+  for (let index = 0; index < windowText.length; index += 1) {
+    const alternatives = ocrSymbolAlternatives(windowText[index], index, targetLength);
+    if (!alternatives.length) return [];
+    const next = [];
+    for (const prefix of variants) {
+      for (const alternative of alternatives) {
+        next.push(prefix + alternative);
+        if (next.length >= maxVariants) break;
+      }
+      if (next.length >= maxVariants) break;
+    }
+    variants = next;
+  }
+  return variants;
+}
+
+function validIsbnFromOcrCandidate(candidate) {
+  const stream = ocrSymbolStream(candidate);
+  const targetLengths = [10, 13];
+
+  for (const targetLength of targetLengths) {
+    if (stream.length < targetLength) continue;
+    for (let start = 0; start <= stream.length - targetLength; start += 1) {
+      const windowText = stream.slice(start, start + targetLength);
+      for (const variant of expandOcrWindow(windowText, targetLength)) {
+        if (targetLength === 10 && isbn10CheckDigitValid(variant)) return isbn10To13(variant);
+        if (targetLength === 13 && isBookIsbn(variant)) return variant;
+      }
+    }
+  }
+  return "";
 }
 
 function extractIsbnFromText(text) {
   const cleaned = String(text ?? "").replace(/[—–−]/g, "-");
   const candidates = [];
-  const isbnRegex = /ISBN(?:-1[03])?\s*[:#]?\s*([0-9OILXx|][0-9OILXx|\s-]{8,28})/gi;
+
+  // Tesseract verwechselt bei älteren ISBN-Schriften besonders häufig 6 mit b/B.
+  // Deshalb wird nach dem ISBN-Label bewusst ein breiter alphanumerischer Bereich erfasst.
+  const isbnRegex = /ISBN(?:-1[03])?\s*[:#]?\s*([A-Z0-9|!][A-Z0-9|!\s-]{8,32})/gi;
   for (const match of cleaned.matchAll(isbnRegex)) candidates.push(match[1]);
-  for (const match of cleaned.matchAll(/(?:^|\D)([0-9OILXx|][0-9OILXx|\s-]{8,22}[0-9Xx])(?:\D|$)/g)) {
-    candidates.push(match[1]);
+
+  // Fallback, falls Tesseract das Wort ISBN selbst nicht sicher gelesen hat.
+  for (const line of cleaned.split(/\r?\n/)) {
+    const runs = line.match(/[0-9OQDIL|!ZASGBTX][0-9A-Z|!\s-]{8,32}/gi) ?? [];
+    candidates.push(...runs);
   }
 
   for (const candidate of candidates) {
-    const compact = normalizeOcrCandidate(candidate);
-    if (/^\d{9}[\dX]$/.test(compact) && isbn10CheckDigitValid(compact)) return isbn10To13(compact);
-    if (/^\d{13}$/.test(compact) && isBookIsbn(compact)) return compact;
+    const isbn = validIsbnFromOcrCandidate(candidate);
+    if (isbn) return isbn;
   }
   return "";
 }
@@ -1257,22 +1320,62 @@ async function recognizeIsbnFromImage(source) {
   els.ocrButton.classList.add("busy");
   let ownCanvas = false;
   let canvas = null;
-  let ocrCanvas = null;
   try {
     setStatus("OCR wird geladen; beim ersten Mal kann das etwas dauern …");
     const worker = await getOcrWorker();
     canvas = source instanceof HTMLCanvasElement ? source : await imageSourceToCanvas(source);
     ownCanvas = canvas !== source;
-    ocrCanvas = makeCanvasVariant(canvas, { x: 0.02, y: 0.08, w: 0.96, h: 0.84 }, true, 1800);
-    const result = await worker.recognize(ocrCanvas);
-    const isbn = extractIsbnFromText(result?.data?.text ?? "");
-    return isbn;
+
+    const passes = [
+      {
+        label: "Gesamtbild",
+        spec: { x: 0.02, y: 0.06, w: 0.96, h: 0.88 },
+        contrast: true,
+        targetWidth: 2000,
+        pageSegMode: "6",
+      },
+      {
+        label: "mittlerer Bereich",
+        spec: { x: 0.02, y: 0.28, w: 0.96, h: 0.50 },
+        contrast: false,
+        targetWidth: 2200,
+        pageSegMode: "11",
+      },
+      {
+        label: "unterer Bereich",
+        spec: { x: 0.02, y: 0.48, w: 0.96, h: 0.46 },
+        contrast: true,
+        targetWidth: 2200,
+        pageSegMode: "6",
+      },
+    ];
+
+    for (let index = 0; index < passes.length; index += 1) {
+      const pass = passes[index];
+      let ocrCanvas = null;
+      try {
+        setStatus(`Gedruckte ISBN wird gelesen (${index + 1}/${passes.length}: ${pass.label}) …`);
+        await worker.setParameters({ tessedit_pageseg_mode: pass.pageSegMode });
+        ocrCanvas = makeCanvasVariant(
+          canvas,
+          pass.spec,
+          pass.contrast,
+          pass.targetWidth
+        );
+        const result = await worker.recognize(ocrCanvas);
+        const isbn = extractIsbnFromText(result?.data?.text ?? "");
+        if (isbn) return isbn;
+      } finally {
+        disposeCanvas(ocrCanvas);
+      }
+    }
+
+    return "";
   } catch (error) {
     console.warn("OCR fehlgeschlagen:", error);
     setStatus(`ISBN-Texterkennung fehlgeschlagen: ${error.message || error}`, "error");
     return "";
   } finally {
-    disposeCanvas(ocrCanvas);
     if (ownCanvas) disposeCanvas(canvas);
     ocrInProgress = false;
     els.ocrButton.classList.remove("busy");

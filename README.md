@@ -1,4 +1,4 @@
-# Buchscanner für Obsidian – v8
+# Buchscanner für Obsidian – v9
 
 ## Manueller Erkennungslauf
 
@@ -36,4 +36,13 @@ Kameraaufnahmen werden nicht in `localStorage`, IndexedDB, dem Service-Worker-Ca
 
 ## Veröffentlichung
 
-Den Inhalt dieses Ordners in das GitHub-Pages-Repository kopieren und committen. Die Seite anschließend einmal mit `?v=8` öffnen. Bei alter Oberfläche die installierte PWA entfernen und die Website-Daten löschen.
+Den Inhalt dieses Ordners in das GitHub-Pages-Repository kopieren und committen. Die Seite anschließend einmal mit `?v=9` öffnen. Bei alter Oberfläche die installierte PWA entfernen und die Website-Daten löschen.
+
+
+## Verbesserte ISBN-Texterkennung in v9
+
+- Behandelt typische OCR-Verwechslungen kontextabhängig, insbesondere `b/B → 6 oder 8`.
+- Nutzt die ISBN-Prüfziffer, um aus mehreren möglichen Ziffernfolgen die gültige ISBN auszuwählen.
+- Erkennt außerdem häufige Verwechslungen wie `O → 0`, `I/l → 1`, `S → 5` und `G → 6`.
+- Führt bei Bedarf bis zu drei OCR-Durchläufe mit unterschiedlichen Bildausschnitten und Segmentierungsmodi durch.
+- Die zusätzlichen Bildvarianten sind weiterhin nur temporäre Canvas-Puffer und werden nach jedem Durchlauf freigegeben.
