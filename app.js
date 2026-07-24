@@ -127,9 +127,12 @@ let torchOn = false;
 let zoomTimer = null;
 let noIsbnSearchInProgress = false;
 let noIsbnSearchResults = [];
+const wikidataPublicationCache = new Map();
 
 const RECOGNITION_ATTEMPTS = 5;
 const RECOGNITION_INTERVAL_MS = 1000;
+const WIKIDATA_API_URL = "https://www.wikidata.org/w/api.php";
+const WIKIDATA_SEARCH_LANGUAGES = ["de", "en"];
 const BATCH_STORAGE_KEY = "bookScanner.batch.v12";
 const LEGACY_BATCH_STORAGE_KEYS = [
   "bookScanner.batch.v11",
@@ -316,15 +319,6 @@ function normalizePublicationYear(value) {
   return year >= 100 && year <= currentYear ? String(year) : "";
 }
 
-function earliestPublicationYear(values) {
-  const years = values
-    .map((value) => normalizePublicationYear(value))
-    .filter(Boolean)
-    .map(Number);
-
-  return years.length ? String(Math.min(...years)) : "";
-}
-
 function normalizeWorkId(value) {
   const match = String(value ?? "").match(/(OL\d+W)/i);
   return match ? match[1].toUpperCase() : "";
@@ -461,6 +455,329 @@ async function fetchJson(url, sourceName) {
   }
 }
 
+
+function wikidataApiUrl(parameters) {
+  const params = new URLSearchParams({
+    format: "json",
+    origin: "*",
+    ...parameters,
+  });
+  return `${WIKIDATA_API_URL}?${params.toString()}`;
+}
+
+async function searchWikidataItems(search, language) {
+  if (!String(search ?? "").trim()) return [];
+  const data = await fetchJson(
+    wikidataApiUrl({
+      action: "wbsearchentities",
+      search: String(search).trim(),
+      language,
+      uselang: "de",
+      type: "item",
+      limit: "10",
+    }),
+    `Wikidata-Suche (${language})`
+  );
+  return Array.isArray(data?.search) ? data.search : [];
+}
+
+async function getWikidataEntities(ids, props = "labels|aliases|descriptions|claims") {
+  const entityIds = uniqueStrings(ids)
+    .filter((id) => /^Q\d+$/.test(id))
+    .slice(0, 50);
+  if (!entityIds.length) return {};
+
+  const data = await fetchJson(
+    wikidataApiUrl({
+      action: "wbgetentities",
+      ids: entityIds.join("|"),
+      props,
+      languages: "de|en",
+      languagefallback: "1",
+    }),
+    "Wikidata-Einträge"
+  );
+  return data?.entities && typeof data.entities === "object" ? data.entities : {};
+}
+
+function wikidataStatements(entity, property) {
+  const statements = entity?.claims?.[property];
+  return Array.isArray(statements)
+    ? statements.filter((statement) => statement?.rank !== "deprecated")
+    : [];
+}
+
+function wikidataItemClaimIds(entity, property) {
+  return wikidataStatements(entity, property)
+    .map((statement) => statement?.mainsnak?.datavalue?.value?.id)
+    .filter((id) => /^Q\d+$/.test(String(id ?? "")));
+}
+
+function wikidataStringClaimValues(entity, property) {
+  return wikidataStatements(entity, property)
+    .map((statement) => statement?.mainsnak?.datavalue?.value)
+    .map((value) => {
+      if (typeof value === "string") return value;
+      if (value && typeof value.text === "string") return value.text;
+      return "";
+    })
+    .filter(Boolean);
+}
+
+function wikidataPublicationYears(entity) {
+  const currentYear = new Date().getFullYear();
+  return uniqueStrings(
+    wikidataStatements(entity, "P577")
+      .map((statement) => statement?.mainsnak?.datavalue?.value?.time)
+      .map((time) => String(time ?? "").match(/^[+-](\d{3,})-/)?.[1] ?? "")
+      .map((year) => Number(year))
+      .filter((year) => Number.isInteger(year) && year >= 100 && year <= currentYear)
+      .map(String)
+  ).map(Number);
+}
+
+function wikidataEntityNames(entity) {
+  const labels = Object.values(entity?.labels ?? {}).map((entry) => entry?.value ?? "");
+  const aliases = Object.values(entity?.aliases ?? {})
+    .flatMap((entries) => Array.isArray(entries) ? entries : [])
+    .map((entry) => entry?.value ?? "");
+  const statedTitles = wikidataStringClaimValues(entity, "P1476");
+  return uniqueStrings([...labels, ...aliases, ...statedTitles]);
+}
+
+function wikidataEntityDescriptions(entity) {
+  return uniqueStrings(
+    Object.values(entity?.descriptions ?? {}).map((entry) => entry?.value ?? "")
+  );
+}
+
+function comparableWords(value) {
+  return new Set(
+    normalizeComparableText(value)
+      .split(" ")
+      .filter((word) => word.length > 1)
+  );
+}
+
+function comparableWordSimilarity(left, right) {
+  const leftWords = comparableWords(left);
+  const rightWords = comparableWords(right);
+  if (!leftWords.size || !rightWords.size) return 0;
+  const intersection = [...leftWords].filter((word) => rightWords.has(word)).length;
+  const union = new Set([...leftWords, ...rightWords]).size;
+  return union ? intersection / union : 0;
+}
+
+function wikidataTitleScore(wantedTitle, candidateTitles) {
+  const wanted = normalizeComparableText(wantedTitle);
+  if (!wanted) return 0;
+  let best = 0;
+
+  for (const candidateTitle of candidateTitles) {
+    const candidate = normalizeComparableText(candidateTitle);
+    if (!candidate) continue;
+    if (candidate === wanted) {
+      best = Math.max(best, 60);
+      continue;
+    }
+    if (
+      Math.min(candidate.length, wanted.length) >= 5 &&
+      (candidate.includes(wanted) || wanted.includes(candidate))
+    ) {
+      best = Math.max(best, 38);
+    }
+    const similarity = comparableWordSimilarity(wanted, candidate);
+    if (similarity >= 0.85) best = Math.max(best, 42);
+    else if (similarity >= 0.65) best = Math.max(best, 30);
+  }
+
+  return best;
+}
+
+function wikidataAuthorScore(wantedAuthors, candidateAuthors, descriptions) {
+  const wanted = uniqueStrings(wantedAuthors.map(normalizeComparableText)).filter(Boolean);
+  if (!wanted.length) return { matched: false, score: 0 };
+  const candidates = uniqueStrings(candidateAuthors.map(normalizeComparableText)).filter(Boolean);
+  const normalizedDescriptions = descriptions.map(normalizeComparableText);
+  let best = 0;
+
+  for (const wantedAuthor of wanted) {
+    for (const candidateAuthor of candidates) {
+      if (candidateAuthor === wantedAuthor) best = Math.max(best, 50);
+      else if (
+        Math.min(candidateAuthor.length, wantedAuthor.length) >= 5 &&
+        (candidateAuthor.includes(wantedAuthor) || wantedAuthor.includes(candidateAuthor))
+      ) {
+        best = Math.max(best, 34);
+      } else if (comparableWordSimilarity(wantedAuthor, candidateAuthor) >= 0.75) {
+        best = Math.max(best, 30);
+      }
+    }
+
+    if (normalizedDescriptions.some((description) => description.includes(wantedAuthor))) {
+      best = Math.max(best, 32);
+    }
+  }
+
+  return { matched: best >= 30, score: best };
+}
+
+function wikidataLooksLikeNonBookAdaptation(descriptions) {
+  const description = descriptions.join(" ").toLocaleLowerCase("en");
+  return /\b(film|television (series|episode|film)|tv (series|episode|film)|video game|audiobook|audio book|radio drama|opera|musical|song|album)\b/i.test(description);
+}
+
+function wikidataDescriptionPublicationYear(descriptions, wantedAuthors) {
+  const normalizedAuthors = wantedAuthors.map(normalizeComparableText).filter(Boolean);
+  for (const description of descriptions) {
+    const normalizedDescription = normalizeComparableText(description);
+    const isLiteraryDescription = /\b(novel|book|literary work|written work|roman|buch|literarisches werk)\b/i.test(description);
+    const authorMentioned = normalizedAuthors.some((author) =>
+      normalizedDescription.includes(author)
+    );
+    if (!isLiteraryDescription || !authorMentioned) continue;
+    const year = normalizePublicationYear(description);
+    if (year) return year;
+  }
+  return "";
+}
+
+async function lookupWikidataFirstPublication(title, authors = []) {
+  const cleanTitle = String(title ?? "").trim();
+  const cleanAuthors = uniqueStrings(authors.map((author) => String(author ?? "").trim()));
+
+  // Ohne Autor ist die Zuordnung bei gleichnamigen Werken zu riskant.
+  if (!cleanTitle || !cleanAuthors.length) return null;
+
+  const cacheKey = `${normalizeComparableText(cleanTitle)}|${cleanAuthors.map(normalizeComparableText).join("|")}`;
+  if (wikidataPublicationCache.has(cacheKey)) {
+    return wikidataPublicationCache.get(cacheKey);
+  }
+
+  const lookupPromise = (async () => {
+    const searchRanks = new Map();
+    const combinedQuery = `${cleanTitle} ${cleanAuthors[0]}`;
+    const queries = [combinedQuery, cleanTitle];
+
+    for (const query of queries) {
+      const settled = await Promise.allSettled(
+        WIKIDATA_SEARCH_LANGUAGES.map((language) => searchWikidataItems(query, language))
+      );
+      for (const result of settled) {
+        if (result.status !== "fulfilled") {
+          console.warn(result.reason);
+          continue;
+        }
+        result.value.forEach((item, index) => {
+          if (!/^Q\d+$/.test(String(item?.id ?? ""))) return;
+          const previous = searchRanks.get(item.id);
+          if (previous === undefined || index < previous) searchRanks.set(item.id, index);
+        });
+      }
+      if (searchRanks.size >= 8) break;
+    }
+
+    const candidateIds = [...searchRanks.keys()].slice(0, 20);
+    if (!candidateIds.length) return null;
+
+    const entities = await getWikidataEntities(candidateIds);
+    const authorIds = uniqueStrings(
+      Object.values(entities).flatMap((entity) => wikidataItemClaimIds(entity, "P50"))
+    );
+    const authorEntities = await getWikidataEntities(authorIds, "labels|aliases");
+    const authorNamesById = new Map(
+      Object.entries(authorEntities).map(([id, entity]) => [id, wikidataEntityNames(entity)])
+    );
+
+    const candidates = [];
+    for (const id of candidateIds) {
+      const entity = entities[id];
+      if (!entity || entity.missing !== undefined) continue;
+      if (wikidataStatements(entity, "P629").length) continue;
+
+      const descriptions = wikidataEntityDescriptions(entity);
+      if (wikidataLooksLikeNonBookAdaptation(descriptions)) continue;
+
+      const titleScore = wikidataTitleScore(cleanTitle, wikidataEntityNames(entity));
+      if (titleScore < 30) continue;
+
+      const linkedAuthorNames = wikidataItemClaimIds(entity, "P50")
+        .flatMap((authorId) => authorNamesById.get(authorId) ?? []);
+      const stringAuthorNames = wikidataStringClaimValues(entity, "P2093");
+      const authorMatch = wikidataAuthorScore(
+        cleanAuthors,
+        [...linkedAuthorNames, ...stringAuthorNames],
+        descriptions
+      );
+      if (!authorMatch.matched) continue;
+
+      const structuredYears = wikidataPublicationYears(entity);
+      const descriptionYear = wikidataDescriptionPublicationYear(descriptions, cleanAuthors);
+      const publicationYear = structuredYears.length
+        ? String(Math.min(...structuredYears))
+        : descriptionYear;
+      if (!publicationYear) continue;
+
+      const descriptionBonus = descriptions.some((description) =>
+        /\b(novel|book|literary work|written work|roman|buch|literarisches werk)\b/i.test(description)
+      ) ? 6 : 0;
+      const structuredDateBonus = structuredYears.length ? 10 : 4;
+      const rankBonus = Math.max(0, 8 - (searchRanks.get(id) ?? 8));
+      const score = titleScore + authorMatch.score + descriptionBonus + rankBonus + structuredDateBonus;
+
+      candidates.push({
+        id,
+        year: publicationYear,
+        score,
+        label: wikidataEntityNames(entity)[0] ?? cleanTitle,
+        yearSource: structuredYears.length ? "P577" : "description",
+      });
+    }
+
+    candidates.sort((left, right) => right.score - left.score);
+    const best = candidates[0];
+    if (!best || best.score < 85) return null;
+
+    const competing = candidates[1];
+    if (
+      competing &&
+      competing.score >= best.score - 8 &&
+      competing.year !== best.year
+    ) {
+      console.info("Wikidata-Jahr nicht übernommen: mehrere ähnlich gute, widersprüchliche Treffer", {
+        title: cleanTitle,
+        authors: cleanAuthors,
+        best,
+        competing,
+      });
+      return null;
+    }
+
+    return best;
+  })().catch((error) => {
+    console.warn("Wikidata-Ersterscheinungsjahr konnte nicht ermittelt werden:", error);
+    return null;
+  });
+
+  wikidataPublicationCache.set(cacheKey, lookupPromise);
+  return lookupPromise;
+}
+
+async function enrichBookWithWikidataYear(book) {
+  if (!book?.title || !Array.isArray(book?.authors) || !book.authors.length) {
+    return { ...book, firstPublicationYear: "" };
+  }
+
+  const wikidataMatch = await lookupWikidataFirstPublication(book.title, book.authors);
+  return {
+    ...book,
+    firstPublicationYear: wikidataMatch?.year ?? "",
+    source: wikidataMatch
+      ? uniqueStrings([...(String(book.source ?? "manual").split("+")), "wikidata"]).join("+")
+      : book.source,
+  };
+}
+
 function languageCodes(languages) {
   if (!Array.isArray(languages)) return "";
   return languages
@@ -535,7 +852,7 @@ async function searchOpenLibraryWork(title, authors = [], preferredWorkId = "") 
 
   const params = new URLSearchParams({
     title,
-    fields: "key,title,author_name,first_publish_year,subject,cover_i",
+    fields: "key,title,author_name,subject,cover_i",
     limit: "20",
   });
   if (authors[0]) params.set("author", authors[0]);
@@ -571,23 +888,9 @@ async function searchOpenLibraryWork(title, authors = [], preferredWorkId = "") 
     const best = scored[0];
     if (!best || best.score < 10) return null;
 
-    // Einzelne Open-Library-Work-Datensätze enthalten gelegentlich das Jahr
-    // einer späteren Ausgabe statt des ersten Erscheinens. Für die Jahreszahl
-    // betrachten wir deshalb alle Treffer mit exakt gleichem Titel und Autor.
-    // Ohne Autor wäre ein gleichnamiges fremdes Werk zu leicht zu verwechseln.
-    const exactTitleAndAuthorMatches = normalizedAuthor
-      ? scored.filter(({ docTitle, authorMatch }) =>
-          docTitle === normalizedTitle && authorMatch
-        )
-      : [];
-    const earliestExactFirstPublishYear = earliestPublicationYear(
-      exactTitleAndAuthorMatches.map(({ doc }) => doc.first_publish_year)
-    );
-
-    return {
-      ...best.doc,
-      earliest_exact_first_publish_year: earliestExactFirstPublishYear,
-    };
+    // Open Library dient hier nur der Werkzuordnung und den Sachschlagwörtern.
+    // Das Ersterscheinungsjahr wird getrennt und konservativ über Wikidata ermittelt.
+    return best.doc;
   } catch (error) {
     console.warn(error);
     return null;
@@ -627,11 +930,6 @@ async function lookupOpenLibrary(isbn) {
     : work?.authors;
   const authors = await resolveOpenLibraryAuthors(authorRefs);
   const workId = normalizeWorkId(workKey);
-  const directFirstPublicationYear = normalizePublicationYear(work?.first_publish_date);
-
-  // Die Suche läuft immer zusätzlich. Sie dient nicht nur als Fallback für
-  // fehlende Daten, sondern validiert das Ersterscheinungsjahr über mehrere
-  // exakte Titel-/Autor-Treffer.
   const searchWork = await searchOpenLibraryWork(
     work?.title ?? edition.title ?? "",
     authors,
@@ -648,22 +946,19 @@ async function lookupOpenLibrary(isbn) {
     ...(Array.isArray(searchWork?.subject) ? searchWork.subject : []),
     ...(Array.isArray(edition.subjects) ? edition.subjects : []),
   ]);
-  const firstPublicationYear =
-    normalizePublicationYear(searchWork?.earliest_exact_first_publish_year) ||
-    directFirstPublicationYear ||
-    normalizePublicationYear(searchWork?.first_publish_year);
+  const title = work?.title ?? edition.title ?? searchWork?.title ?? "";
 
-  return {
-    title: work?.title ?? edition.title ?? searchWork?.title ?? "",
+  return enrichBookWithWikidataYear({
+    title,
     authors,
-    firstPublicationYear,
+    firstPublicationYear: "",
     language: languageCodes(edition.languages),
     openLibraryWorkId: workId || normalizeWorkId(searchWork?.key),
     coverUrl: coverId ? `https://covers.openlibrary.org/b/id/${coverId}-L.jpg` : "",
     genres: inferGenres(subjects),
     subjects,
     source: "open-library",
-  };
+  });
 }
 
 function selectBestGoogleVolume(items, isbn) {
@@ -686,13 +981,14 @@ async function lookupGoogleBooks(isbn, apiKey) {
   const openLibraryWork = await searchOpenLibraryWork(info.title ?? "", authors);
   const subjects = normalizeSubjects(openLibraryWork?.subject ?? []);
   const googleCategories = Array.isArray(info.categories) ? info.categories : [];
+  // Der Google-Books-Treffer stammt aus der konkreten ISBN-Suche und ist
+  // deshalb die primäre Titelquelle; Open Library ergänzt nur Werk-ID und Subjects.
+  const title = info.title ?? openLibraryWork?.title ?? "";
 
-  return {
-    title: openLibraryWork?.title ?? info.title ?? "",
+  return enrichBookWithWikidataYear({
+    title,
     authors,
-    firstPublicationYear:
-      normalizePublicationYear(openLibraryWork?.earliest_exact_first_publish_year) ||
-      normalizePublicationYear(openLibraryWork?.first_publish_year),
+    firstPublicationYear: "",
     language: info.language ?? "",
     openLibraryWorkId: normalizeWorkId(openLibraryWork?.key),
     coverUrl: String(imageLinks.thumbnail ?? imageLinks.smallThumbnail ?? "")
@@ -700,7 +996,7 @@ async function lookupGoogleBooks(isbn, apiKey) {
     genres: uniqueStrings([...googleCategories, ...inferGenres(subjects)]),
     subjects,
     source: openLibraryWork ? "google-books+open-library-work" : "google-books",
-  };
+  });
 }
 
 
@@ -749,7 +1045,7 @@ function deduplicateTextSearchResults(results) {
 async function searchOpenLibraryByText(title, author = "") {
   const params = new URLSearchParams({
     title,
-    fields: "key,title,author_name,first_publish_year,subject,cover_i,language",
+    fields: "key,title,author_name,subject,cover_i,language",
     limit: "12",
   });
   if (author) params.set("author", author);
@@ -769,7 +1065,7 @@ async function searchOpenLibraryByText(title, author = "") {
           score: textSearchScore(title, author, doc.title ?? "", authors, index),
           title: doc.title ?? "",
           authors,
-          firstPublicationYear: normalizePublicationYear(doc.first_publish_year),
+          firstPublicationYear: "",
           language: languageCodes(doc.language).split(", ").slice(0, 3).join(", "),
           openLibraryWorkId: normalizeWorkId(doc.key),
           coverUrl: Number(doc.cover_i) > 0
@@ -843,8 +1139,8 @@ function renderNoIsbnResults(results, sourceLabel = "") {
       ? `<img src="${escapeHtml(book.coverUrl)}" alt="" loading="lazy">`
       : '<div class="no-isbn-result-cover" aria-hidden="true">kein Cover</div>';
     const details = [
-      book.firstPublicationYear ? `zuerst ${book.firstPublicationYear}` : "",
       sourceLabel || (book.source.startsWith("google") ? "Google Books" : "Open Library"),
+      "Jahr wird nach Auswahl über Wikidata geprüft",
     ].filter(Boolean).join(" · ");
 
     return `
@@ -953,12 +1249,26 @@ async function searchBookWithoutIsbn() {
   }
 }
 
-function selectNoIsbnResult(index) {
+async function selectNoIsbnResult(index) {
   const book = noIsbnSearchResults[index];
-  if (!book) return;
-  applyBookData("", book);
-  setStatus(`„${book.title}“ wurde aus der Titelsuche übernommen.`, "success");
-  els.resultCard.scrollIntoView({ behavior: "smooth", block: "start" });
+  if (!book || noIsbnSearchInProgress) return;
+
+  noIsbnSearchInProgress = true;
+  els.noIsbnSearchButton.disabled = true;
+  setNoIsbnStatus("Ermittle das Ersterscheinungsjahr konservativ über Wikidata …");
+
+  try {
+    const enrichedBook = await enrichBookWithWikidataYear(book);
+    applyBookData("", enrichedBook);
+    const yearNote = enrichedBook.firstPublicationYear
+      ? ` Ersterscheinungsjahr: ${enrichedBook.firstPublicationYear}.`
+      : " Wikidata lieferte keinen eindeutig zuordenbaren Werk-Treffer; das Jahr bleibt leer.";
+    setStatus(`„${enrichedBook.title}“ wurde aus der Titelsuche übernommen.${yearNote}`, "success");
+    els.resultCard.scrollIntoView({ behavior: "smooth", block: "start" });
+  } finally {
+    noIsbnSearchInProgress = false;
+    els.noIsbnSearchButton.disabled = false;
+  }
 }
 
 function applyBookData(isbn, book) {
