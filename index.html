@@ -16,7 +16,7 @@
     <header>
       <p class="eyebrow">OBSIDIAN-BEGLEITER</p>
       <h1>Buchscanner</h1>
-      <p>ISBNs nacheinander scannen, kurz prüfen und gesammelt in den konfigurierten Obsidian-Vault übernehmen.</p>
+      <p>Bücher per ISBN erfassen, als Werke aufbereiten und gesammelt in deinen Obsidian-Vault übernehmen.</p>
     </header>
 
     <section class="card">
@@ -94,17 +94,20 @@
       </div>
 
       <div class="grid two">
-        <label>ISBN<input id="isbn" readonly></label>
-        <label>Verlag<input id="publisher"></label>
-        <label>Erscheinungsdatum<input id="published-date"></label>
-        <label>Seiten<input id="pages" inputmode="numeric"></label>
-        <label>Sprache<input id="language"></label>
+        <label>ISBN der gescannten Quelle<input id="isbn" readonly></label>
+        <label>Ersterscheinungsjahr des Werks
+          <input id="first-publication-year" inputmode="numeric" maxlength="4" placeholder="z. B. 1977">
+        </label>
+        <label>Lesesprache<input id="language"></label>
         <label>Cover-URL<input id="cover-url"></label>
         <label>Genres
           <input id="genres" placeholder="Mehrere Genres mit ; trennen">
         </label>
         <label>Open-Library-Schlagwörter
           <textarea id="subjects" rows="4" placeholder="Mehrere Begriffe mit ; trennen"></textarea>
+        </label>
+        <label>Open-Library-Werk-ID
+          <input id="openlibrary-work-id" readonly placeholder="wird automatisch ermittelt">
         </label>
         <label>Besitz
           <select id="ownership">
@@ -159,6 +162,6 @@
   </main>
   <script src="https://cdn.jsdelivr.net/npm/@ericblade/quagga2@1.12.1/dist/quagga.min.js"
           crossorigin="anonymous" referrerpolicy="no-referrer"></script>
-  <script src="./app.js?v=10"></script>
+  <script src="./app.js?v=12"></script>
 </body>
 </html>

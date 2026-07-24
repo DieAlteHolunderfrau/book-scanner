@@ -19,10 +19,9 @@ const els = {
   title: document.querySelector("#title"),
   authors: document.querySelector("#authors"),
   isbn: document.querySelector("#isbn"),
-  publisher: document.querySelector("#publisher"),
-  publishedDate: document.querySelector("#published-date"),
-  pages: document.querySelector("#pages"),
+  firstPublicationYear: document.querySelector("#first-publication-year"),
   language: document.querySelector("#language"),
+  openLibraryWorkId: document.querySelector("#openlibrary-work-id"),
   coverUrl: document.querySelector("#cover-url"),
   coverPreview: document.querySelector("#cover-preview"),
   genres: document.querySelector("#genres"),
@@ -68,8 +67,9 @@ let zoomTimer = null;
 
 const RECOGNITION_ATTEMPTS = 5;
 const RECOGNITION_INTERVAL_MS = 1000;
-const BATCH_STORAGE_KEY = "bookScanner.batch.v11";
+const BATCH_STORAGE_KEY = "bookScanner.batch.v12";
 const LEGACY_BATCH_STORAGE_KEYS = [
+  "bookScanner.batch.v11",
   "bookScanner.batch.v10",
   "bookScanner.batch.v9",
   "bookScanner.batch.v8",
@@ -245,6 +245,28 @@ function todayIso() {
   return new Date().toISOString().slice(0, 10);
 }
 
+function normalizePublicationYear(value) {
+  const match = String(value ?? "").match(/\b(\d{3,4})\b/);
+  if (!match) return "";
+  const year = Number(match[1]);
+  const currentYear = new Date().getFullYear();
+  return year >= 100 && year <= currentYear ? String(year) : "";
+}
+
+function normalizeWorkId(value) {
+  const match = String(value ?? "").match(/(OL\d+W)/i);
+  return match ? match[1].toUpperCase() : "";
+}
+
+function normalizeComparableText(value) {
+  return String(value ?? "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLocaleLowerCase("de")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
 function getFormData() {
   return {
     vault: els.vault.value.trim(),
@@ -252,10 +274,9 @@ function getFormData() {
     title: els.title.value.trim(),
     authors: splitAuthors(els.authors.value),
     isbn: normalizeIsbn(els.isbn.value),
-    publisher: els.publisher.value.trim(),
-    publishedDate: els.publishedDate.value.trim(),
-    pages: digitsOnly(els.pages.value),
+    firstPublicationYear: normalizePublicationYear(els.firstPublicationYear.value),
     language: els.language.value.trim(),
+    openLibraryWorkId: els.openLibraryWorkId.value.trim(),
     coverUrl: els.coverUrl.value.trim().replace(/^http:\/\//i, "https://"),
     genres: splitList(els.genres.value),
     subjects: splitList(els.subjects.value),
@@ -283,22 +304,26 @@ function buildMarkdown(book = getFormData()) {
   const forms = isbnForms(book.isbn);
 
   lines.push(
-    `isbn: ${yamlString(forms.primary)}`,
-    `isbn_10: ${yamlString(forms.isbn10)}`,
-    `isbn_13: ${yamlString(forms.isbn13)}`,
-    `publisher: ${yamlString(book.publisher)}`,
-    `publication_date: ${yamlString(book.publishedDate)}`,
-    `pages: ${book.pages || "null"}`,
+    `first_publication_year: ${book.firstPublicationYear || "null"}`,
+    `language_read: ${yamlString(book.language)}`,
+    `source_isbn: ${yamlString(forms.primary)}`,
+    `openlibrary_work_id: ${yamlString(book.openLibraryWorkId || "")}`,
+    `cover_url: ${yamlString(book.coverUrl)}`,
+    `ownership: ${book.ownership}`,
     `reading_status: ${book.readingStatus}`,
     `added: ${book.added || todayIso()}`,
     `metadata_source: ${book.metadataSource || "manual"}`,
     "---",
     "",
-    "# Notizen",
+    `# ${book.title}`,
     "",
-    "# Zitate",
+    "## Leseverlauf",
     "",
-    "# Review",
+    "## Notizen",
+    "",
+    "## Zitate",
+    "",
+    "## Eindruck",
     ""
   );
 
@@ -404,11 +429,63 @@ function normalizeSubjects(subjects) {
   ).slice(0, 40);
 }
 
-async function resolveOpenLibraryWork(edition) {
+function openLibraryWorkKey(edition) {
   const workKey = Array.isArray(edition?.works) ? edition.works[0]?.key : "";
-  if (!workKey || !String(workKey).startsWith("/works/")) return null;
+  return String(workKey).startsWith("/works/") ? String(workKey) : "";
+}
+
+async function resolveOpenLibraryWork(edition) {
+  const workKey = openLibraryWorkKey(edition);
+  if (!workKey) return null;
   try {
     return await fetchJson(`https://openlibrary.org${workKey}.json`, "Open Library Werk");
+  } catch (error) {
+    console.warn(error);
+    return null;
+  }
+}
+
+async function searchOpenLibraryWork(title, authors = [], preferredWorkId = "") {
+  if (!title) return null;
+
+  const params = new URLSearchParams({
+    title,
+    fields: "key,title,author_name,first_publish_year,subject,cover_i",
+    limit: "8",
+  });
+  if (authors[0]) params.set("author", authors[0]);
+
+  try {
+    const data = await fetchJson(
+      `https://openlibrary.org/search.json?${params.toString()}`,
+      "Open Library Werksuche"
+    );
+    const docs = Array.isArray(data?.docs) ? data.docs : [];
+    if (!docs.length) return null;
+
+    const normalizedTitle = normalizeComparableText(title);
+    const normalizedAuthor = normalizeComparableText(authors[0] ?? "");
+    const preferredId = normalizeWorkId(preferredWorkId);
+
+    const scored = docs.map((doc, index) => {
+      const docId = normalizeWorkId(doc.key);
+      const docTitle = normalizeComparableText(doc.title);
+      const docAuthors = Array.isArray(doc.author_name) ? doc.author_name : [];
+      const authorMatch = !normalizedAuthor || docAuthors.some(
+        (name) => normalizeComparableText(name) === normalizedAuthor
+      );
+      let score = 0;
+      if (preferredId && docId === preferredId) score += 100;
+      if (docTitle === normalizedTitle) score += 20;
+      else if (docTitle.includes(normalizedTitle) || normalizedTitle.includes(docTitle)) score += 8;
+      if (authorMatch) score += 10;
+      score -= index * 0.01;
+      return { doc, score };
+    }).sort((left, right) => right.score - left.score);
+
+    const best = scored[0];
+    if (!best || best.score < 10) return null;
+    return best.doc;
   } catch (error) {
     console.warn(error);
     return null;
@@ -421,7 +498,7 @@ async function resolveOpenLibraryAuthors(authors) {
   const names = await Promise.all(
     authors.slice(0, 8).map(async (author) => {
       if (author?.name) return author.name;
-      const key = author?.key;
+      const key = author?.key ?? author?.author?.key;
       if (!key || !String(key).startsWith("/authors/")) return "";
       try {
         const data = await fetchJson(`https://openlibrary.org${key}.json`, "Open Library Autor");
@@ -441,23 +518,43 @@ async function lookupOpenLibrary(isbn) {
     `https://openlibrary.org/isbn/${encodeURIComponent(isbn)}.json`,
     "Open Library"
   );
-  const [authors, work] = await Promise.all([
-    resolveOpenLibraryAuthors(edition.authors),
-    resolveOpenLibraryWork(edition),
-  ]);
-  const coverId = Array.isArray(edition.covers) ? edition.covers.find((id) => Number(id) > 0) : null;
+  const workKey = openLibraryWorkKey(edition);
+  const work = await resolveOpenLibraryWork(edition);
+  const authorRefs = Array.isArray(edition.authors) && edition.authors.length
+    ? edition.authors
+    : work?.authors;
+  const authors = await resolveOpenLibraryAuthors(authorRefs);
+  const workId = normalizeWorkId(workKey);
+  const directFirstPublicationYear = normalizePublicationYear(work?.first_publish_date);
+  const needsWorkSearch =
+    !directFirstPublicationYear ||
+    !workId ||
+    !Array.isArray(work?.subjects) ||
+    work.subjects.length === 0;
+  const searchWork = needsWorkSearch
+    ? await searchOpenLibraryWork(work?.title ?? edition.title ?? "", authors, workId)
+    : null;
+
+  const coverIds = [
+    ...(Array.isArray(edition.covers) ? edition.covers : []),
+    ...(Array.isArray(work?.covers) ? work.covers : []),
+  ];
+  const coverId = coverIds.find((id) => Number(id) > 0);
   const subjects = normalizeSubjects([
-    ...(Array.isArray(edition.subjects) ? edition.subjects : []),
     ...(Array.isArray(work?.subjects) ? work.subjects : []),
+    ...(Array.isArray(searchWork?.subject) ? searchWork.subject : []),
+    ...(Array.isArray(edition.subjects) ? edition.subjects : []),
   ]);
+  const firstPublicationYear =
+    directFirstPublicationYear ||
+    normalizePublicationYear(searchWork?.first_publish_year);
 
   return {
-    title: edition.title ?? work?.title ?? "",
+    title: work?.title ?? edition.title ?? searchWork?.title ?? "",
     authors,
-    publisher: Array.isArray(edition.publishers) ? edition.publishers[0] ?? "" : edition.publishers ?? "",
-    publishedDate: edition.publish_date ?? work?.first_publish_date ?? "",
-    pages: edition.number_of_pages ?? edition.pagination ?? "",
+    firstPublicationYear,
     language: languageCodes(edition.languages),
+    openLibraryWorkId: workId || normalizeWorkId(searchWork?.key),
     coverUrl: coverId ? `https://covers.openlibrary.org/b/id/${coverId}-L.jpg` : "",
     genres: inferGenres(subjects),
     subjects,
@@ -481,18 +578,22 @@ async function lookupGoogleBooks(isbn, apiKey) {
 
   const info = selectBestGoogleVolume(data.items, isbn).volumeInfo ?? {};
   const imageLinks = info.imageLinks ?? {};
+  const authors = Array.isArray(info.authors) ? info.authors : [];
+  const openLibraryWork = await searchOpenLibraryWork(info.title ?? "", authors);
+  const subjects = normalizeSubjects(openLibraryWork?.subject ?? []);
+  const googleCategories = Array.isArray(info.categories) ? info.categories : [];
+
   return {
-    title: info.title ?? "",
-    authors: Array.isArray(info.authors) ? info.authors : [],
-    publisher: info.publisher ?? "",
-    publishedDate: info.publishedDate ?? "",
-    pages: info.pageCount ?? "",
+    title: openLibraryWork?.title ?? info.title ?? "",
+    authors,
+    firstPublicationYear: normalizePublicationYear(openLibraryWork?.first_publish_year),
     language: info.language ?? "",
+    openLibraryWorkId: normalizeWorkId(openLibraryWork?.key),
     coverUrl: String(imageLinks.thumbnail ?? imageLinks.smallThumbnail ?? "")
       .replace(/^http:\/\//i, "https://"),
-    genres: Array.isArray(info.categories) ? info.categories : [],
-    subjects: [],
-    source: "google-books",
+    genres: uniqueStrings([...googleCategories, ...inferGenres(subjects)]),
+    subjects,
+    source: openLibraryWork ? "google-books+open-library-work" : "google-books",
   };
 }
 
@@ -500,10 +601,9 @@ function applyBookData(isbn, book) {
   els.isbn.value = isbn;
   els.title.value = book?.title ?? "";
   els.authors.value = Array.isArray(book?.authors) ? book.authors.join("; ") : "";
-  els.publisher.value = book?.publisher ?? "";
-  els.publishedDate.value = book?.publishedDate ?? "";
-  els.pages.value = digitsOnly(book?.pages ?? "");
+  els.firstPublicationYear.value = normalizePublicationYear(book?.firstPublicationYear ?? "");
   els.language.value = book?.language ?? "";
+  els.openLibraryWorkId.value = book?.openLibraryWorkId ?? "";
   els.coverUrl.value = book?.coverUrl ?? "";
   els.genres.value = Array.isArray(book?.genres) ? book.genres.join("; ") : "";
   els.subjects.value = Array.isArray(book?.subjects) ? book.subjects.join("; ") : "";
@@ -633,7 +733,6 @@ function setQueueStatus(message, kind = "") {
 
 function bookFilename(book) {
   const titlePart = safeFilename(book.title) || "Unbenanntes Buch";
-  const authorPart = book.authors?.[0] ? ` - ${safeFilename(book.authors[0])}` : "";
   return `${titlePart}.md`;
 }
 
@@ -680,7 +779,7 @@ function renderBatch() {
             ${badge}
           </div>
           <p>${escapeHtml(author)}</p>
-          <small>${escapeHtml(book.isbn)}${book.genres?.length ? ` · ${escapeHtml(book.genres.join(", "))}` : ""}</small>
+          <small>${escapeHtml(book.isbn)}${book.firstPublicationYear ? ` · zuerst ${escapeHtml(book.firstPublicationYear)}` : ""}${book.genres?.length ? ` · ${escapeHtml(book.genres.join(", "))}` : ""}</small>
         </div>
         <div class="queue-item-actions">
           <button type="button" data-action="edit">Bearbeiten</button>
@@ -698,10 +797,9 @@ function resetFormForNextScan() {
   els.isbn.value = "";
   els.title.value = "";
   els.authors.value = "";
-  els.publisher.value = "";
-  els.publishedDate.value = "";
-  els.pages.value = "";
+  els.firstPublicationYear.value = "";
   els.language.value = "";
+  els.openLibraryWorkId.value = "";
   els.coverUrl.value = "";
   els.genres.value = "";
   els.subjects.value = "";
@@ -725,6 +823,17 @@ function addCurrentBookToBatch() {
   const duplicate = batch.find((entry) => isbnEquivalent(entry.isbn, book.isbn) && entry.id !== editingBatchId);
   if (duplicate) {
     setStatus(`ISBN ${book.isbn} befindet sich bereits im Stapel.`, "error");
+    return;
+  }
+
+  const duplicateWork = book.openLibraryWorkId
+    ? batch.find((entry) =>
+        normalizeWorkId(entry.openLibraryWorkId) === normalizeWorkId(book.openLibraryWorkId) &&
+        entry.id !== editingBatchId
+      )
+    : null;
+  if (duplicateWork) {
+    setStatus(`Das Werk „${book.title}“ befindet sich bereits im Stapel.`, "error");
     return;
   }
 
@@ -754,10 +863,9 @@ function editBatchBook(id) {
   applyBookData(book.isbn, {
     title: book.title,
     authors: book.authors,
-    publisher: book.publisher,
-    publishedDate: book.publishedDate,
-    pages: book.pages,
+    firstPublicationYear: book.firstPublicationYear,
     language: book.language,
+    openLibraryWorkId: book.openLibraryWorkId,
     coverUrl: book.coverUrl,
     genres: book.genres,
     subjects: book.subjects,
@@ -1978,8 +2086,15 @@ setStatus("Tippe auf „Kamera starten“, um die Vorschau zu öffnen.");
 updateRecognitionControls();
 updateCameraButton();
 
-if ("serviceWorker" in navigator) {
+const isLocalDevelopment =
+  location.hostname === "localhost" || location.hostname === "127.0.0.1";
+
+if ("serviceWorker" in navigator && !isLocalDevelopment) {
   window.addEventListener("load", () => {
     navigator.serviceWorker.register("./sw.js").catch(console.warn);
   });
+} else if ("serviceWorker" in navigator && isLocalDevelopment) {
+  navigator.serviceWorker.getRegistrations()
+    .then((registrations) => Promise.all(registrations.map((registration) => registration.unregister())))
+    .catch(console.warn);
 }

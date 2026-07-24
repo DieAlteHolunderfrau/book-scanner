@@ -2,7 +2,7 @@
   "id": "./",
   "name": "Buchscanner für Obsidian",
   "short_name": "Buchscanner",
-  "description": "ISBN scannen und Buchnotizen in Obsidian anlegen.",
+  "description": "ISBN scannen und werkbezogene Buchnotizen in Obsidian anlegen.",
   "lang": "de",
   "start_url": "./",
   "scope": "./",

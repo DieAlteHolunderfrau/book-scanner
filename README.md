@@ -1,36 +1,70 @@
-# Buchscanner für Obsidian – v11
+# Buchscanner für Obsidian – v12
 
-## ISBN-10 bleibt ISBN-10
+## Werkorientiertes Datenmodell
 
-Eine erkannte oder manuell eingegebene ISBN wird nicht mehr zwangsweise in ISBN-13 umgewandelt.
+Die App verwendet die ISBN nur noch als technischen Einstieg in die Metadatensuche. Es wird weiterhin genau eine Obsidian-Notiz pro Buch/Werk erzeugt; separate Ausgabennotizen gibt es nicht.
 
-Beispiel:
+Ausgabenspezifische Felder wurden aus Oberfläche und Markdown entfernt:
 
-- erkannt/eingegeben: `0451160916`
-- erster Open-Library-Aufruf: `/isbn/0451160916.json`
-- nur falls dort kein Treffer kommt, wird zusätzlich die äquivalente ISBN-13 `9780451160911` als Fallback versucht.
+- Verlag
+- Erscheinungsdatum der gescannten Ausgabe
+- Seitenzahl
 
-Das gleiche gilt umgekehrt für eine ISBN-13 mit `978`-Präfix: Sie bleibt primär erhalten; die berechenbare ISBN-10 wird nur als Such-Fallback verwendet.
+Erhalten bleiben praktisch relevante Angaben wie Lesesprache, Cover, Besitz und Lesestatus.
 
-## OCR
+## Ersterscheinungsjahr
 
-Die OCR gibt eine gültige zehnstellige ISBN jetzt direkt zurück. Sie wird vor der Metadatensuche nicht mehr in ISBN-13 umgewandelt. Typische Zeichenverwechslungen werden weiterhin über die Prüfziffer aufgelöst.
+Bei Open-Library-Treffern folgt die App der ISBN-Ausgabe zum zugehörigen Werk. Das Feld `first_publish_date` des Werks wird auf ein Jahr reduziert. Fehlt es dort, versucht die App ergänzend die Open-Library-Werksuche und verwendet deren `first_publish_year`.
+
+Das Ergebnis wird editierbar angezeigt und so gespeichert:
+
+```yaml
+first_publication_year: 1977
+```
+
+Google Books liefert kein eigenes Werkobjekt. Wird Google Books als Fallback verwendet, versucht die App deshalb zusätzlich, Titel und Autor in der Open-Library-Werksuche zuzuordnen. Nur bei einem ausreichend plausiblen Treffer werden Ersterscheinungsjahr und Werk-ID ergänzt.
 
 ## Obsidian-Frontmatter
 
-Die ursprüngliche ISBN und beide verfügbaren Formen werden getrennt gespeichert:
+Beispiel:
 
 ```yaml
-isbn: "0451160916"
-isbn_10: "0451160916"
-isbn_13: "9780451160911"
+---
+type: book
+title: "The Shining"
+authors:
+  - "[[Stephen King]]"
+genres:
+  - "Horror"
+subjects:
+  - "Haunted hotels"
+first_publication_year: 1977
+language_read: "eng"
+source_isbn: "0451160916"
+openlibrary_work_id: "OL45804W"
+cover_url: "https://..."
+ownership: owned
+reading_status: unread
+added: 2026-07-24
+metadata_source: open-library
+---
 ```
 
-Bei einer ISBN-13 mit `979` kann in der Regel keine ISBN-10 abgeleitet werden; `isbn_10` bleibt dann leer.
+`source_isbn` bleibt in genau der Form erhalten, die gescannt oder manuell eingegeben wurde. Eine äquivalente ISBN-10 beziehungsweise ISBN-13 wird nur als Such-Fallback verwendet.
 
-## Dubletten
+## Dateiname
 
-ISBN-10 und die äquivalente ISBN-13 gelten im Stapel als dasselbe Buch. Dadurch kann dieselbe Ausgabe nicht einmal als ISBN-10 und ein zweites Mal als ISBN-13 hinzugefügt werden.
+Der Name der Markdown-Datei besteht nur noch aus dem Buchtitel:
+
+```text
+Bücher/The Shining.md
+```
+
+Ungültige Zeichen werden weiterhin entfernt. Bei zwei unterschiedlichen Werken mit exakt demselben Titel kann es dadurch zu einer Dateikollision kommen.
+
+## Stapel und Dubletten
+
+Die Stapelprüfung erkennt weiterhin äquivalente ISBN-10-/ISBN-13-Werte. Zusätzlich gilt dieselbe Open-Library-Werk-ID als bereits vorhandenes Werk, auch wenn eine andere Ausgabe mit einer anderen ISBN gescannt wurde. Ein vorhandener v11-Stapel wird automatisch übernommen.
 
 ## Erkennungslauf
 
@@ -42,4 +76,4 @@ ISBN-10 und die äquivalente ISBN-13 gelten im Stapel als dasselbe Buch. Dadurch
 
 ## Veröffentlichung
 
-Alle Dateien in das GitHub-Pages-Repository übernehmen und die Seite einmal mit `?v=11` öffnen. Falls noch die alte Version erscheint, die installierte PWA und die Website-Daten entfernen und anschließend neu installieren.
+Alle Dateien in das GitHub-Pages-Repository übernehmen und die Seite einmal mit `?v=12` öffnen. Falls noch die alte Version erscheint, die installierte PWA und die Website-Daten entfernen und anschließend neu installieren.
