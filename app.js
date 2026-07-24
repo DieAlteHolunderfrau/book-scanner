@@ -332,7 +332,6 @@ function buildMarkdown(book = getFormData()) {
     `added: ${book.added || todayIso()}`,
     `metadata_source: ${book.metadataSource || "manual"}`,
     "---",
-    "",
     "# Notizen",
     "",
     "# Zitate",
