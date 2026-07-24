@@ -333,15 +333,11 @@ function buildMarkdown(book = getFormData()) {
     `metadata_source: ${book.metadataSource || "manual"}`,
     "---",
     "",
-    `# ${book.title}`,
+    "# Notizen",
     "",
-    "## Leseverlauf",
+    "# Zitate",
     "",
-    "## Notizen",
-    "",
-    "## Zitate",
-    "",
-    "## Eindruck",
+    "# Eindruck",
     ""
   );
 
