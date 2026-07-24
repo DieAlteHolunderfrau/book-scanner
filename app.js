@@ -287,18 +287,36 @@ function getFormData() {
   };
 }
 
-function buildMarkdown(book = getFormData()) {
-  const lines = ["---", "type: book", `title: ${yamlString(book.title)}`, "authors:"];
+function stripObsidianLink(value) {
+  return String(value ?? "")
+    .trim()
+    .replace(/^\[\[/, "")
+    .replace(/\]\]$/, "")
+    .trim();
+}
 
-  if (book.authors.length) {
-    for (const author of book.authors) {
-      lines.push(`  - ${yamlString(`[[${author}]]`)}`);
-    }
-  } else {
+function appendObsidianLinkList(lines, key, values) {
+  lines.push(`${key}:`);
+
+  if (!values?.length) {
     lines.push("  -");
+    return;
   }
 
-  appendYamlList(lines, "genres", book.genres ?? []);
+  for (const value of values) {
+    const cleanValue = stripObsidianLink(value);
+
+    if (cleanValue) {
+      lines.push(`  - ${yamlString(`[[${cleanValue}]]`)}`);
+    }
+  }
+}
+
+function buildMarkdown(book = getFormData()) {
+  const lines = ["---", "type: book", `title: ${yamlString(book.title)}`];
+
+  appendObsidianLinkList(lines, "authors", book.authors ?? []);
+  appendObsidianLinkList(lines, "genres", book.genres ?? []);
   appendYamlList(lines, "subjects", book.subjects ?? []);
 
   const forms = isbnForms(book.isbn);
