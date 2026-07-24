@@ -305,6 +305,7 @@ function buildMarkdown(book = getFormData()) {
 
   lines.push(
     `first_publication_year: ${book.firstPublicationYear || "null"}`,
+    `language_read: ${yamlString(book.language)}`,
     `source_isbn: ${yamlString(forms.primary)}`,
     `openlibrary_work_id: ${yamlString(book.openLibraryWorkId || "")}`,
     `cover_url: ${yamlString(book.coverUrl)}`,
@@ -314,11 +315,15 @@ function buildMarkdown(book = getFormData()) {
     `metadata_source: ${book.metadataSource || "manual"}`,
     "---",
     "",
-    "# Notizen",
+    `# ${book.title}`,
     "",
-    "# Zitate",
+    "## Leseverlauf",
     "",
-    "# Eindruck",
+    "## Notizen",
+    "",
+    "## Zitate",
+    "",
+    "## Eindruck",
     ""
   );
 
@@ -597,6 +602,7 @@ function applyBookData(isbn, book) {
   els.title.value = book?.title ?? "";
   els.authors.value = Array.isArray(book?.authors) ? book.authors.join("; ") : "";
   els.firstPublicationYear.value = normalizePublicationYear(book?.firstPublicationYear ?? "");
+  els.language.value = book?.language ?? "";
   els.openLibraryWorkId.value = book?.openLibraryWorkId ?? "";
   els.coverUrl.value = book?.coverUrl ?? "";
   els.genres.value = Array.isArray(book?.genres) ? book.genres.join("; ") : "";
@@ -858,6 +864,7 @@ function editBatchBook(id) {
     title: book.title,
     authors: book.authors,
     firstPublicationYear: book.firstPublicationYear,
+    language: book.language,
     openLibraryWorkId: book.openLibraryWorkId,
     coverUrl: book.coverUrl,
     genres: book.genres,
