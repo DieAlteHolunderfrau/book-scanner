@@ -316,6 +316,15 @@ function normalizePublicationYear(value) {
   return year >= 100 && year <= currentYear ? String(year) : "";
 }
 
+function earliestPublicationYear(values) {
+  const years = values
+    .map((value) => normalizePublicationYear(value))
+    .filter(Boolean)
+    .map(Number);
+
+  return years.length ? String(Math.min(...years)) : "";
+}
+
 function normalizeWorkId(value) {
   const match = String(value ?? "").match(/(OL\d+W)/i);
   return match ? match[1].toUpperCase() : "";
@@ -527,7 +536,7 @@ async function searchOpenLibraryWork(title, authors = [], preferredWorkId = "") 
   const params = new URLSearchParams({
     title,
     fields: "key,title,author_name,first_publish_year,subject,cover_i",
-    limit: "8",
+    limit: "20",
   });
   if (authors[0]) params.set("author", authors[0]);
 
@@ -556,12 +565,29 @@ async function searchOpenLibraryWork(title, authors = [], preferredWorkId = "") 
       else if (docTitle.includes(normalizedTitle) || normalizedTitle.includes(docTitle)) score += 8;
       if (authorMatch) score += 10;
       score -= index * 0.01;
-      return { doc, score };
+      return { doc, score, docTitle, docAuthors, authorMatch };
     }).sort((left, right) => right.score - left.score);
 
     const best = scored[0];
     if (!best || best.score < 10) return null;
-    return best.doc;
+
+    // Einzelne Open-Library-Work-Datensätze enthalten gelegentlich das Jahr
+    // einer späteren Ausgabe statt des ersten Erscheinens. Für die Jahreszahl
+    // betrachten wir deshalb alle Treffer mit exakt gleichem Titel und Autor.
+    // Ohne Autor wäre ein gleichnamiges fremdes Werk zu leicht zu verwechseln.
+    const exactTitleAndAuthorMatches = normalizedAuthor
+      ? scored.filter(({ docTitle, authorMatch }) =>
+          docTitle === normalizedTitle && authorMatch
+        )
+      : [];
+    const earliestExactFirstPublishYear = earliestPublicationYear(
+      exactTitleAndAuthorMatches.map(({ doc }) => doc.first_publish_year)
+    );
+
+    return {
+      ...best.doc,
+      earliest_exact_first_publish_year: earliestExactFirstPublishYear,
+    };
   } catch (error) {
     console.warn(error);
     return null;
@@ -602,14 +628,15 @@ async function lookupOpenLibrary(isbn) {
   const authors = await resolveOpenLibraryAuthors(authorRefs);
   const workId = normalizeWorkId(workKey);
   const directFirstPublicationYear = normalizePublicationYear(work?.first_publish_date);
-  const needsWorkSearch =
-    !directFirstPublicationYear ||
-    !workId ||
-    !Array.isArray(work?.subjects) ||
-    work.subjects.length === 0;
-  const searchWork = needsWorkSearch
-    ? await searchOpenLibraryWork(work?.title ?? edition.title ?? "", authors, workId)
-    : null;
+
+  // Die Suche läuft immer zusätzlich. Sie dient nicht nur als Fallback für
+  // fehlende Daten, sondern validiert das Ersterscheinungsjahr über mehrere
+  // exakte Titel-/Autor-Treffer.
+  const searchWork = await searchOpenLibraryWork(
+    work?.title ?? edition.title ?? "",
+    authors,
+    workId
+  );
 
   const coverIds = [
     ...(Array.isArray(edition.covers) ? edition.covers : []),
@@ -622,6 +649,7 @@ async function lookupOpenLibrary(isbn) {
     ...(Array.isArray(edition.subjects) ? edition.subjects : []),
   ]);
   const firstPublicationYear =
+    normalizePublicationYear(searchWork?.earliest_exact_first_publish_year) ||
     directFirstPublicationYear ||
     normalizePublicationYear(searchWork?.first_publish_year);
 
@@ -662,7 +690,9 @@ async function lookupGoogleBooks(isbn, apiKey) {
   return {
     title: openLibraryWork?.title ?? info.title ?? "",
     authors,
-    firstPublicationYear: normalizePublicationYear(openLibraryWork?.first_publish_year),
+    firstPublicationYear:
+      normalizePublicationYear(openLibraryWork?.earliest_exact_first_publish_year) ||
+      normalizePublicationYear(openLibraryWork?.first_publish_year),
     language: info.language ?? "",
     openLibraryWorkId: normalizeWorkId(openLibraryWork?.key),
     coverUrl: String(imageLinks.thumbnail ?? imageLinks.smallThumbnail ?? "")
