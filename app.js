@@ -45,6 +45,67 @@ const els = {
   scrollScannerButton: document.querySelector("#scroll-scanner-button"),
 };
 
+function installNoIsbnUi() {
+  if (!document.querySelector("#no-isbn-panel")) {
+    const manualIsbnRow = els.manualIsbn?.closest(".manual");
+    manualIsbnRow?.insertAdjacentHTML("afterend", `
+      <details id="no-isbn-panel" class="settings no-isbn-panel">
+        <summary>Buch ohne ISBN</summary>
+        <p class="hint">Suche nach Titel und optional nach Autor. Wird nichts gefunden, kann aus dem Titel eine leere Obsidian-Buchnotiz erzeugt werden.</p>
+        <div class="no-isbn-search-grid">
+          <label>Titel
+            <input id="no-isbn-title" autocomplete="off" placeholder="Buchtitel">
+          </label>
+          <label>Autor oder Autorin (optional)
+            <input id="no-isbn-author" autocomplete="off" placeholder="Name">
+          </label>
+          <button id="no-isbn-search-button" type="button">Nach Titel suchen</button>
+        </div>
+        <p id="no-isbn-status" class="status" aria-live="polite"></p>
+        <div id="no-isbn-results" class="no-isbn-results"></div>
+        <button id="no-isbn-shell-button" type="button" class="hidden">Nur Titel als leere Notiz vorbereiten</button>
+      </details>
+    `);
+  }
+
+  if (!document.querySelector("#no-isbn-styles")) {
+    const style = document.createElement("style");
+    style.id = "no-isbn-styles";
+    style.textContent = `
+      .no-isbn-panel { margin-top: 16px; }
+      .no-isbn-search-grid { display: grid; grid-template-columns: 1fr 1fr auto; gap: 10px; align-items: end; margin-top: 14px; }
+      .no-isbn-search-grid button { width: auto; min-width: 150px; }
+      .no-isbn-results { display: grid; gap: 10px; margin-top: 12px; }
+      .no-isbn-result { display: grid; grid-template-columns: 54px 1fr auto; gap: 12px; align-items: center; padding: 10px; border: 1px solid rgba(36,33,29,.14); border-radius: 12px; background: rgba(255,255,255,.62); }
+      .no-isbn-result img, .no-isbn-result-cover { width: 54px; height: 78px; object-fit: cover; border-radius: 6px; background: rgba(36,33,29,.08); }
+      .no-isbn-result-cover { display: grid; place-items: center; font-size: .72rem; color: #625c54; text-align: center; }
+      .no-isbn-result p, .no-isbn-result small { margin: 3px 0 0; }
+      .no-isbn-result button { width: auto; min-width: 100px; }
+      #no-isbn-shell-button { margin-top: 12px; }
+      @media (max-width: 620px) {
+        .no-isbn-search-grid { grid-template-columns: 1fr; }
+        .no-isbn-search-grid button { width: 100%; }
+        .no-isbn-result { grid-template-columns: 48px 1fr; }
+        .no-isbn-result img, .no-isbn-result-cover { width: 48px; height: 70px; }
+        .no-isbn-result button { grid-column: 1 / -1; width: 100%; }
+      }
+    `;
+    document.head.appendChild(style);
+  }
+
+  Object.assign(els, {
+    noIsbnPanel: document.querySelector("#no-isbn-panel"),
+    noIsbnTitle: document.querySelector("#no-isbn-title"),
+    noIsbnAuthor: document.querySelector("#no-isbn-author"),
+    noIsbnSearchButton: document.querySelector("#no-isbn-search-button"),
+    noIsbnStatus: document.querySelector("#no-isbn-status"),
+    noIsbnResults: document.querySelector("#no-isbn-results"),
+    noIsbnShellButton: document.querySelector("#no-isbn-shell-button"),
+  });
+}
+
+installNoIsbnUi();
+
 let lastScanned = "";
 let lookupInProgress = false;
 let reviewInProgress = false;
@@ -64,6 +125,8 @@ let recognitionRunning = false;
 let recognitionRunId = 0;
 let torchOn = false;
 let zoomTimer = null;
+let noIsbnSearchInProgress = false;
+let noIsbnSearchResults = [];
 
 const RECOGNITION_ATTEMPTS = 5;
 const RECOGNITION_INTERVAL_MS = 1000;
@@ -610,6 +673,264 @@ async function lookupGoogleBooks(isbn, apiKey) {
   };
 }
 
+
+function setNoIsbnStatus(message, kind = "") {
+  if (!els.noIsbnStatus) return;
+  els.noIsbnStatus.textContent = message;
+  els.noIsbnStatus.className = `status ${kind}`.trim();
+}
+
+function textSearchScore(title, author, candidateTitle, candidateAuthors = [], index = 0) {
+  const wantedTitle = normalizeComparableText(title);
+  const wantedAuthor = normalizeComparableText(author);
+  const foundTitle = normalizeComparableText(candidateTitle);
+  const foundAuthors = candidateAuthors.map(normalizeComparableText);
+  let score = 0;
+
+  if (foundTitle === wantedTitle) score += 30;
+  else if (foundTitle.includes(wantedTitle) || wantedTitle.includes(foundTitle)) score += 14;
+  else {
+    const wantedWords = new Set(wantedTitle.split(" ").filter((word) => word.length > 2));
+    const foundWords = new Set(foundTitle.split(" "));
+    const overlap = [...wantedWords].filter((word) => foundWords.has(word)).length;
+    score += overlap * 3;
+  }
+
+  if (wantedAuthor) {
+    if (foundAuthors.some((name) => name === wantedAuthor)) score += 18;
+    else if (foundAuthors.some((name) => name.includes(wantedAuthor) || wantedAuthor.includes(name))) score += 9;
+    else score -= 8;
+  }
+
+  return score - index * 0.01;
+}
+
+function deduplicateTextSearchResults(results) {
+  const seen = new Set();
+  return results.filter((book) => {
+    const workId = normalizeWorkId(book.openLibraryWorkId);
+    const key = workId || `${normalizeComparableText(book.title)}|${normalizeComparableText(book.authors?.[0] ?? "")}`;
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+async function searchOpenLibraryByText(title, author = "") {
+  const params = new URLSearchParams({
+    title,
+    fields: "key,title,author_name,first_publish_year,subject,cover_i,language",
+    limit: "12",
+  });
+  if (author) params.set("author", author);
+
+  const data = await fetchJson(
+    `https://openlibrary.org/search.json?${params.toString()}`,
+    "Open Library Titelsuche"
+  );
+  const docs = Array.isArray(data?.docs) ? data.docs : [];
+
+  return deduplicateTextSearchResults(
+    docs
+      .map((doc, index) => {
+        const authors = Array.isArray(doc.author_name) ? doc.author_name : [];
+        const subjects = normalizeSubjects(doc.subject ?? []);
+        return {
+          score: textSearchScore(title, author, doc.title ?? "", authors, index),
+          title: doc.title ?? "",
+          authors,
+          firstPublicationYear: normalizePublicationYear(doc.first_publish_year),
+          language: languageCodes(doc.language).split(", ").slice(0, 3).join(", "),
+          openLibraryWorkId: normalizeWorkId(doc.key),
+          coverUrl: Number(doc.cover_i) > 0
+            ? `https://covers.openlibrary.org/b/id/${doc.cover_i}-L.jpg`
+            : "",
+          genres: inferGenres(subjects),
+          subjects,
+          source: "open-library-text",
+        };
+      })
+      .filter((book) => book.title && book.score >= 8)
+      .sort((left, right) => right.score - left.score)
+      .slice(0, 8)
+  );
+}
+
+async function searchGoogleBooksByText(title, author, apiKey) {
+  if (!apiKey) return [];
+  const queryParts = [`intitle:\"${title.replace(/\"/g, "")}\"`];
+  if (author) queryParts.push(`inauthor:\"${author.replace(/\"/g, "")}\"`);
+  const params = new URLSearchParams({
+    q: queryParts.join(" "),
+    maxResults: "10",
+    printType: "books",
+    key: apiKey,
+  });
+  const data = await fetchJson(
+    `https://www.googleapis.com/books/v1/volumes?${params.toString()}`,
+    "Google Books Titelsuche"
+  );
+  const items = Array.isArray(data?.items) ? data.items : [];
+
+  return deduplicateTextSearchResults(
+    items
+      .map((item, index) => {
+        const info = item.volumeInfo ?? {};
+        const authors = Array.isArray(info.authors) ? info.authors : [];
+        const imageLinks = info.imageLinks ?? {};
+        const categories = Array.isArray(info.categories) ? info.categories : [];
+        return {
+          score: textSearchScore(title, author, info.title ?? "", authors, index),
+          title: info.title ?? "",
+          authors,
+          // Google Books beschreibt Volumes/Ausgaben. Das Ausgabedatum wird daher
+          // bewusst nicht als werkbezogenes Ersterscheinungsjahr übernommen.
+          firstPublicationYear: "",
+          language: info.language ?? "",
+          openLibraryWorkId: "",
+          coverUrl: String(imageLinks.thumbnail ?? imageLinks.smallThumbnail ?? "")
+            .replace(/^http:\/\//i, "https://"),
+          genres: uniqueStrings(categories),
+          subjects: [],
+          source: "google-books-text",
+        };
+      })
+      .filter((book) => book.title && book.score >= 8)
+      .sort((left, right) => right.score - left.score)
+      .slice(0, 8)
+  );
+}
+
+function renderNoIsbnResults(results, sourceLabel = "") {
+  noIsbnSearchResults = results;
+  if (!els.noIsbnResults) return;
+  els.noIsbnShellButton.textContent = "Keiner passt? Nur Titel als leere Notiz vorbereiten";
+  els.noIsbnShellButton.classList.remove("hidden");
+
+  els.noIsbnResults.innerHTML = results.map((book, index) => {
+    const author = book.authors?.join(", ") || "Autor unbekannt";
+    const cover = book.coverUrl
+      ? `<img src="${escapeHtml(book.coverUrl)}" alt="" loading="lazy">`
+      : '<div class="no-isbn-result-cover" aria-hidden="true">kein Cover</div>';
+    const details = [
+      book.firstPublicationYear ? `zuerst ${book.firstPublicationYear}` : "",
+      sourceLabel || (book.source.startsWith("google") ? "Google Books" : "Open Library"),
+    ].filter(Boolean).join(" · ");
+
+    return `
+      <article class="no-isbn-result">
+        ${cover}
+        <div>
+          <strong>${escapeHtml(book.title)}</strong>
+          <p>${escapeHtml(author)}</p>
+          <small>${escapeHtml(details)}</small>
+        </div>
+        <button type="button" data-no-isbn-index="${index}">Auswählen</button>
+      </article>`;
+  }).join("");
+}
+
+function clearNoIsbnSearch(clearInputs = false) {
+  noIsbnSearchResults = [];
+  if (els.noIsbnResults) els.noIsbnResults.innerHTML = "";
+  if (els.noIsbnShellButton) els.noIsbnShellButton.classList.add("hidden");
+  setNoIsbnStatus("");
+  if (clearInputs) {
+    if (els.noIsbnTitle) els.noIsbnTitle.value = "";
+    if (els.noIsbnAuthor) els.noIsbnAuthor.value = "";
+  }
+}
+
+function prepareTitleOnlyShell() {
+  const title = els.noIsbnTitle?.value.trim() ?? "";
+  if (!title) {
+    setNoIsbnStatus("Gib zuerst einen Buchtitel ein.", "error");
+    els.noIsbnTitle?.focus();
+    return;
+  }
+
+  applyBookData("", {
+    title,
+    authors: [],
+    firstPublicationYear: "",
+    language: "",
+    openLibraryWorkId: "",
+    coverUrl: "",
+    genres: [],
+    subjects: [],
+    source: "manual-title-only",
+  });
+  setStatus(`Leere Buchnotiz für „${title}“ vorbereitet. Du kannst sie direkt nach Obsidian übertragen oder zum Stapel hinzufügen.`, "success");
+  els.resultCard.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+async function searchBookWithoutIsbn() {
+  const title = els.noIsbnTitle?.value.trim() ?? "";
+  const author = els.noIsbnAuthor?.value.trim() ?? "";
+  if (!title) {
+    setNoIsbnStatus("Gib mindestens den Buchtitel ein.", "error");
+    els.noIsbnTitle?.focus();
+    return;
+  }
+  if (noIsbnSearchInProgress || lookupInProgress) return;
+
+  noIsbnSearchInProgress = true;
+  els.noIsbnSearchButton.disabled = true;
+  els.noIsbnShellButton.classList.add("hidden");
+  els.noIsbnResults.innerHTML = "";
+  setNoIsbnStatus("Suche zuerst bei Open Library …");
+
+  const errors = [];
+  try {
+    try {
+      const openLibraryResults = await searchOpenLibraryByText(title, author);
+      if (openLibraryResults.length) {
+        renderNoIsbnResults(openLibraryResults, "Open Library");
+        setNoIsbnStatus(`${openLibraryResults.length} mögliche${openLibraryResults.length === 1 ? "r" : ""} Treffer bei Open Library.`, "success");
+        return;
+      }
+      errors.push("Open Library: kein passender Treffer");
+    } catch (error) {
+      errors.push(error.message);
+      console.warn(error);
+    }
+
+    const apiKey = els.googleApiKey.value.trim();
+    if (apiKey) {
+      setNoIsbnStatus("Open Library hatte keinen passenden Treffer. Versuche Google Books …");
+      try {
+        const googleResults = await searchGoogleBooksByText(title, author, apiKey);
+        if (googleResults.length) {
+          renderNoIsbnResults(googleResults, "Google Books");
+          setNoIsbnStatus(`${googleResults.length} mögliche${googleResults.length === 1 ? "r" : ""} Treffer bei Google Books.`, "success");
+          return;
+        }
+        errors.push("Google Books: kein passender Treffer");
+      } catch (error) {
+        errors.push(error.message);
+        console.warn(error);
+      }
+    } else {
+      errors.push("Google Books nicht versucht: kein API-Key hinterlegt");
+    }
+
+    els.noIsbnShellButton.textContent = "Nur Titel als leere Notiz vorbereiten";
+    els.noIsbnShellButton.classList.remove("hidden");
+    setNoIsbnStatus(`Kein passender Katalogtreffer. ${errors.join(" | ")}`, "error");
+  } finally {
+    noIsbnSearchInProgress = false;
+    els.noIsbnSearchButton.disabled = false;
+  }
+}
+
+function selectNoIsbnResult(index) {
+  const book = noIsbnSearchResults[index];
+  if (!book) return;
+  applyBookData("", book);
+  setStatus(`„${book.title}“ wurde aus der Titelsuche übernommen.`, "success");
+  els.resultCard.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
 function applyBookData(isbn, book) {
   els.isbn.value = isbn;
   els.title.value = book?.title ?? "";
@@ -792,7 +1113,7 @@ function renderBatch() {
             ${badge}
           </div>
           <p>${escapeHtml(author)}</p>
-          <small>${escapeHtml(book.isbn)}${book.firstPublicationYear ? ` · zuerst ${escapeHtml(book.firstPublicationYear)}` : ""}${book.genres?.length ? ` · ${escapeHtml(book.genres.join(", "))}` : ""}</small>
+          <small>${escapeHtml(book.isbn || "ohne ISBN")}${book.firstPublicationYear ? ` · zuerst ${escapeHtml(book.firstPublicationYear)}` : ""}${book.genres?.length ? ` · ${escapeHtml(book.genres.join(", "))}` : ""}</small>
         </div>
         <div class="queue-item-actions">
           <button type="button" data-action="edit">Bearbeiten</button>
@@ -806,6 +1127,7 @@ function renderBatch() {
 function resetFormForNextScan() {
   editingBatchId = null;
   currentMetadataSource = "manual";
+  clearNoIsbnSearch(true);
   els.manualIsbn.value = "";
   els.isbn.value = "";
   els.title.value = "";
@@ -828,12 +1150,18 @@ function resetFormForNextScan() {
 
 function addCurrentBookToBatch() {
   const book = getFormData();
-  if (!book.title || !isBookIsbn(book.isbn)) {
-    setStatus("Titel und gültige ISBN müssen vorhanden sein.", "error");
+  if (!book.title) {
+    setStatus("Ein Buchtitel muss vorhanden sein.", "error");
+    return;
+  }
+  if (book.isbn && !isBookIsbn(book.isbn)) {
+    setStatus("Die eingetragene ISBN ist ungültig.", "error");
     return;
   }
 
-  const duplicate = batch.find((entry) => isbnEquivalent(entry.isbn, book.isbn) && entry.id !== editingBatchId);
+  const duplicate = book.isbn
+    ? batch.find((entry) => entry.isbn && isbnEquivalent(entry.isbn, book.isbn) && entry.id !== editingBatchId)
+    : null;
   if (duplicate) {
     setStatus(`ISBN ${book.isbn} befindet sich bereits im Stapel.`, "error");
     return;
@@ -1082,8 +1410,12 @@ function clearBatch() {
 
 function openInObsidian() {
   const book = getFormData();
-  if (!book.title || !isBookIsbn(book.isbn)) {
-    setStatus("Titel und gültige ISBN müssen vorhanden sein.", "error");
+  if (!book.title) {
+    setStatus("Ein Buchtitel muss vorhanden sein.", "error");
+    return;
+  }
+  if (book.isbn && !isBookIsbn(book.isbn)) {
+    setStatus("Die eingetragene ISBN ist ungültig.", "error");
     return;
   }
   openBookInObsidian(book, false, true);
@@ -2028,6 +2360,20 @@ async function scanPhoto(file) {
     if (runId === recognitionRunId && !reviewInProgress && !lookupInProgress) finishRecognition();
   }
 }
+
+els.noIsbnSearchButton.addEventListener("click", searchBookWithoutIsbn);
+els.noIsbnShellButton.addEventListener("click", prepareTitleOnlyShell);
+els.noIsbnTitle.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") searchBookWithoutIsbn();
+});
+els.noIsbnAuthor.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") searchBookWithoutIsbn();
+});
+els.noIsbnResults.addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-no-isbn-index]");
+  if (!button) return;
+  selectNoIsbnResult(Number(button.dataset.noIsbnIndex));
+});
 
 els.lookupButton.addEventListener("click", () => lookupBook(els.manualIsbn.value));
 els.recognitionButton.addEventListener("click", startRecognitionRun);
